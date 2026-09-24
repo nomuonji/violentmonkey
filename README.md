@@ -14,9 +14,42 @@ X の不要 UI や画面効果を減らし、動画をクリックしただけ�
 - Source: [`scripts/x-lightweight.user.js`](./scripts/x-lightweight.user.js)
 - Install / update: https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/x-lightweight.user.js
 
-Violentmonkey がインストール済みのブラウザで上記 Raw URL を開いてインストールしてください。
+### ChatGPT Lightweight
+
+ChatGPT のアニメーションや装飾を抑え、画面外メッセージ等の描画負荷を軽減します。
+
+- Source: [`scripts/chatgpt-lightweight.user.js`](./scripts/chatgpt-lightweight.user.js)
+- Install / update: https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/chatgpt-lightweight.user.js
+
+### YouTube Lightweight
+
+YouTube のアンビエント効果・販促枠・Shorts 等を整理し、ホームや検索結果の画面外描画を軽量化します。
+
+- Source: [`scripts/youtube-lightweight.user.js`](./scripts/youtube-lightweight.user.js)
+- Install / update: https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/youtube-lightweight.user.js
+
+### Bilibili Minimal Viewing
+
+Bilibili の広告・大型バナー・コメント等を整理しつつ、動画ページの関連動画は残します。
+
+- Source: [`scripts/bilibili-minimal.user.js`](./scripts/bilibili-minimal.user.js)
+- Install / update: https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/bilibili-minimal.user.js
+
+## Installation
+
+Violentmonkey がインストール済みのブラウザで、各スクリプトの **Install / update** の Raw URL を開いてインストールしてください。
 
 以後は userscript 内の `@updateURL` / `@downloadURL` と `@version` を使って GitHub 上の最新版を取得します。
+
+## Migration note
+
+2026-09-24 に Stylus から以下を userscript 化しました。
+
+- Bilibili Minimal Viewing
+- ChatGPT Lightweight
+- YouTube Lightweight
+
+Stylus バックアップ内にも X Lightweight が含まれていましたが、GitHub 側の `x-lightweight.user.js` の方が新しいため、旧 Stylus 版では上書きしていません。
 
 ## 運用方針
 
@@ -36,7 +69,10 @@ Violentmonkey がインストール済みのブラウザで上記 Raw URL を開
 ```text
 violentmonkey/
 ├── scripts/
-│   └── x-lightweight.user.js
+│   ├── bilibili-minimal.user.js
+│   ├── chatgpt-lightweight.user.js
+│   ├── x-lightweight.user.js
+│   └── youtube-lightweight.user.js
 ├── README.md
 └── SECURITY.md
 ```
