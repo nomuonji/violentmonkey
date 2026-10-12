@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bilibili Dual Subtitles (EN + JA)
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      0.5.0
-// @description  ページ表示時は追加通信なし。標準字幕／キャッシュを優先し、字幕取得は明示操作時のみ。
+// @version      0.6.0
+// @description  Bilibili標準字幕の旧/新DOMを検出。APIは手動取得時のみ、日英切替・位置調整対応。
 // @author       nomuonji
 // @match        https://www.bilibili.com/video/*
 // @match        https://bilibili.com/video/*
@@ -42,6 +42,7 @@
     cache: new Map(), pending: new Set(), translators: new Map(), probes: new Set(),
     pairs: new Map(), painted: '', translateEpoch: 0,
     wbiKey: null, nativeHolder: null, nativeOpacity: '', nativeText: '', nativeMissingAt: 0,
+    nativeDiagnostics: '字幕要素の検出待ち',
     network: {total:0, api:0, subtitles:0, failed:0}, sourceLabel: '確認中', requesting: false,
   };
 
@@ -259,15 +260,77 @@
     if(state.nativeHolder?.isConnected)state.nativeHolder.style.opacity=state.nativeOpacity;
     state.nativeHolder=null;state.nativeText='';state.nativeMissingAt=0;
   }
+  // Bilibili renders captions in several different DOM variants.
+  // Query only dedicated caption containers, never menus, controls or danmaku.
+  const NATIVE_CAPTION_SELECTORS = [
+    '.bpx-player-subtitle-panel-text',
+    '.bpx-player-subtitle-panel-major-group',
+    '.bpx-player-subtitle-panel-wrap .bpx-player-subtitle-item',
+    '.bpx-player-subtitle-wrap .bpx-player-subtitle-item',
+    '.bilibili-player-video-subtitle .subtitle-item',
+    '.bilibili-player-video-subtitle-panel .subtitle-item',
+  ];
+  function nativeDiagnostics(value) {
+    state.nativeDiagnostics=value;
+    const detail=state.root?.querySelector('.vm-dual-native-detail');
+    if(detail)detail.textContent='標準字幕検出: '+value;
+  }
+  function visuallyAvailable(element) {
+    let current=element;
+    for(let depth=0;current&&depth<10;depth++,current=current.parentElement) {
+      if(current.hidden||current.getAttribute?.('aria-hidden')==='true')return false;
+      const css=getComputedStyle(current);
+      // Our own overlay intentionally sets opacity:0 on the native panel.
+      // Don't treat that as disabled; display:none / visibility:hidden still matter.
+      if(css.display==='none'||css.visibility==='hidden'||css.visibility==='collapse')return false;
+      if(current===state.player)break;
+    }
+    return true;
+  }
+  function selectedNativeLanguage() {
+    const active=document.querySelector(
+      '.bpx-player-ctrl-subtitle-language-item.bpx-state-active, '+
+      '.bpx-player-ctrl-subtitle-language-item.active, '+
+      '.bpx-player-ctrl-subtitle-language-item[aria-selected="true"]'
+    );
+    const raw=active?.getAttribute?.('data-lan')||active?.dataset?.lan;
+    const parsed=language(raw);
+    return ['zh','ja','en'].includes(parsed)?parsed:null;
+  }
   function nativeCaption() {
-    const element=document.querySelector('.bpx-player-subtitle-panel-text');
-    if(!element||state.root?.contains(element))return null;
-    const holder=element.closest('.bpx-player-subtitle-panel-position')||element;
-    if(getComputedStyle(holder).display==='none'||getComputedStyle(holder).visibility==='hidden')return null;
-    const content=(element.textContent||'').trim();
-    if(!content||content.length>500)return null;
-    const lang=/[\u3040-\u30ff]/.test(content)?'ja':/[\u4e00-\u9fff]/.test(content)?'zh':/[a-z]/i.test(content)?'en':null;
-    return lang?{content,lang,holder}:null;
+    const scope=state.player?.isConnected?state.player:document;
+    const roots=[scope];
+    if(scope!==document)roots.push(document); // fullscreen/portal panel outside player root
+    const used=new Set();
+    let count=0;
+    for(const root of roots) {
+      for(const selector of NATIVE_CAPTION_SELECTORS) {
+        const candidates=root.querySelectorAll?.(selector)||[];
+        for(const element of candidates) {
+          if(used.has(element)||state.root?.contains(element))continue;
+          used.add(element);
+          count++;
+          if(!visuallyAvailable(element))continue;
+          const content=String(element.textContent||'').replace(/\s+/g,' ').trim();
+          if(!content||content.length>500)continue;
+          const holder=element.closest?.(
+            '.bpx-player-subtitle-panel-position, '+
+            '.bpx-player-subtitle-wrap, '+
+            '.bpx-player-subtitle-panel-wrap, '+
+            '.bilibili-player-video-subtitle, '+
+            '.bilibili-player-video-subtitle-panel'
+          )||element;
+          if(!visuallyAvailable(holder))continue;
+          const lang=selectedNativeLanguage()||
+            (/[ぁ-ゟ゠-ヿ]/.test(content)?'ja':/[\u3400-\u9fff]/.test(content)?'zh':/[a-z]/i.test(content)?'en':null);
+          if(!lang)continue;
+          nativeDiagnostics(selector+' で検出');
+          return {content,lang,holder};
+        }
+      }
+    }
+    nativeDiagnostics(count?'字幕要素あり・表示テキスト待ち':'字幕DOMなし（標準字幕をONにし、再生中に確認）');
+    return null;
   }
   function followNativeCaption() {
     if(!state.source?.native||!state.video)return;
@@ -605,7 +668,7 @@
 #vm-dual-root .vm-dual-options input[type=range]{flex:1;min-width:40px}
 #vm-dual-root .vm-dual-options select{flex:1;border-radius:5px;border:1px solid #ffffff50;background:#242b35;color:#fff;padding:6px}
 #vm-dual-root .vm-dual-options .vm-dual-setting-label{width:66px;flex-shrink:0}
-#vm-dual-root .vm-dual-status,#vm-dual-root .vm-dual-translation-status,#vm-dual-root .vm-dual-network-detail{line-height:1.45;overflow-wrap:anywhere;margin-top:8px;font-size:12px;color:#d9dee6}
+#vm-dual-root .vm-dual-status,#vm-dual-root .vm-dual-translation-status,#vm-dual-root .vm-dual-network-detail,#vm-dual-root .vm-dual-native-detail{line-height:1.45;overflow-wrap:anywhere;margin-top:8px;font-size:12px;color:#d9dee6}
 #vm-dual-root .vm-dual-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
 #vm-dual-root .vm-dual-caption{position:absolute;left:50%;width:96%;max-width:96%;bottom:11%;transform:translateX(-50%);text-align:center;font-weight:700;font-size:var(--vm-font);line-height:1.35;text-shadow:0 2px 5px #000,0 0 2px #000;white-space:pre-wrap;overflow-wrap:anywhere}
 #vm-dual-root .vm-dual-line{display:table;max-width:98%;margin:2px auto;padding:1px 8px;border-radius:4px;background:#000a}
@@ -634,6 +697,7 @@
   <label><input type="checkbox" class="vm-dual-original-setting">中国語原文も表示</label>
   <div class="vm-dual-actions"><button class="vm-dual-prepare" type="button">翻訳モデルを準備</button><button class="vm-dual-retry" type="button">字幕を取得（追加通信）</button></div>
   <div class="vm-dual-network-detail" role="status"></div>
+  <div class="vm-dual-native-detail" role="status"></div>
   <div class="vm-dual-translation-status" role="status"></div>
   <div class="vm-dual-status" role="status"></div>
 </div>
@@ -661,7 +725,7 @@
     root.querySelector('.vm-dual-retry').addEventListener('click',requestSubtitles);
     root.querySelector('.vm-dual-fetch').addEventListener('click',requestSubtitles);
     root.style.setProperty('--vm-font',state.font+'px');updatePosition();
-    status(state.status);updateNetworkUI();updateTranslationStatus();enable(state.enabled);updateFetchButtons();
+    status(state.status);updateNetworkUI();nativeDiagnostics(state.nativeDiagnostics);updateTranslationStatus();enable(state.enabled);updateFetchButtons();
   }
 
   function updateFetchButtons() {
