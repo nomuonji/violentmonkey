@@ -243,6 +243,7 @@
     if(!state.source?.native||!state.video)return;
     const found=nativeCaption();
     if(!found) {
+      releaseNative(); // Restore the site's own subtitles when unavailable or switched off.
       state.caption?.replaceChildren();state.painted='';
       return;
     }
@@ -626,7 +627,11 @@
     }
   }
   function tick() {
-    const video=currentVideo();if(!video)return;
+    const video=currentVideo();
+    if(!video) {
+      releaseNative(); // SPA navigation away from the player.
+      return;
+    }
     const element=document.querySelector('.bpx-player-video-wrap video, #bilibili-player video, video');
     if(element)mount(element);
     if(state.source?.native)followNativeCaption();
