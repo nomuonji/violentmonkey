@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bilibili Dual Subtitles (EN + JA)
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      0.2.0
-// @description  日英・日・英の字幕切替、字幕位置の調整、翻訳モデルの準備機能。
+// @version      0.3.0
+// @description  プレイヤー字幕優先・必要最小限の取得・キャッシュ・取得制限時の停止に対応した日英字幕。
 // @author       nomuonji
 // @match        https://www.bilibili.com/video/*
 // @match        https://bilibili.com/video/*
@@ -41,6 +41,7 @@
     source: null, english: null, japanese: null,
     cache: new Map(), pending: new Set(), translators: new Map(), probes: new Set(),
     pairs: new Map(), painted: '', translateEpoch: 0,
+    wbiKey: null, nativeHolder: null, nativeOpacity: '', nativeText: '',
   };
 
   // RFC 1321 MD5, with UTF-8 input. Required for Bilibili WBI signatures.
@@ -75,19 +76,64 @@
     return [h0,h1,h2,h3].map(n=>Array.from({length:4},(_,i)=>(n>>>(i*8)&255).toString(16).padStart(2,'0')).join('')).join('');
   }
 
+  // Short-lived local cache; no cookies, authorization headers, signed URLs or API keys.
+  const CACHE_KEY='dual-sub-cache-v1';
+  const BLOCK_KEY='dual-remote-block-until';
+  const CACHE_TTL=6*60*60*1000;
+  const BLOCK_TTL=24*60*60*1000;
+  const CACHE_LIMIT=5;
+  function cachedTracks(pageKey) {
+    try {
+      const collection=GM_getValue(CACHE_KEY,{});
+      const record=collection?.[pageKey];
+      if(!record||Date.now()-record.savedAt>CACHE_TTL||record.savedAt>Date.now()+60000)return null;
+      if(!Array.isArray(record.tracks)||!record.tracks.length||record.tracks.length>3)return null;
+      const tracks=record.tracks.map(t=>({lang:t.lang,label:t.label,items:cues(t.items)}));
+      return tracks.every(t=>t.items.length)?tracks:null;
+    } catch {return null;}
+  }
+  function saveTracks(pageKey,tracks) {
+    try {
+      if(!tracks.length||tracks.some(t=>!t.items?.length)||JSON.stringify(tracks).length>380000)return;
+      const stored=GM_getValue(CACHE_KEY,{});
+      const entries=Object.entries(stored||{}).filter(([key,v])=>
+        key!==pageKey&&v&&Number.isFinite(v.savedAt)&&Date.now()-v.savedAt<CACHE_TTL
+      ).sort((a,b)=>b[1].savedAt-a[1].savedAt).slice(0,CACHE_LIMIT-1);
+      const collection=Object.fromEntries(entries);
+      collection[pageKey]={savedAt:Date.now(),tracks};
+      GM_setValue(CACHE_KEY,collection);
+    } catch(err) {console.warn('[Bili Dual] キャッシュ保存不可:',err);}
+  }
+  function haltRemote(reason) {
+    const current=Number(GM_getValue(BLOCK_KEY,0))||0;
+    GM_setValue(BLOCK_KEY,Math.max(current,Date.now()+BLOCK_TTL));
+    throw new Error('Bilibiliのアクセス制限を検出したため字幕取得を24時間停止しました: '+reason);
+  }
+  function assertRemoteAllowed() {
+    const until=Number(GM_getValue(BLOCK_KEY,0))||0;
+    if(Date.now()<until)throw new Error('Bilibiliへの追加取得を停止中です（'+new Date(until).toLocaleString()+'まで）。プレイヤー字幕・キャッシュは利用可能です。');
+  }
+  function parseResponse(payload) {
+    if([-352,-412].includes(payload?.code))haltRemote('API code '+payload.code);
+    return payload;
+  }
   function json(url) {
     return new Promise((resolve,reject)=>{
       const target=new URL(url, location.origin);
       if (target.protocol!=='https:' || !allowed.test(target.hostname)) {
         reject(new Error('許可されていない字幕URL')); return;
       }
+      try {assertRemoteAllowed();}catch(err){reject(err);return;}
       GM_xmlhttpRequest({
         method:'GET',url:target.href,responseType:'json',timeout:15000,anonymous:false,
         headers:{Accept:'application/json'},
         onload:r=>{
-          if (r.status<200||r.status>=300) {reject(new Error('字幕API HTTP '+r.status));return;}
-          try {resolve(typeof r.response==='string'?JSON.parse(r.response):r.response);}
-          catch {reject(new Error('字幕JSONを解析できません'));}
+          if([412,429].includes(r.status)) {
+            try {haltRemote('HTTP '+r.status);}catch(err){reject(err);}return;
+          }
+          if(r.status<200||r.status>=300) {reject(new Error('字幕API HTTP '+r.status));return;}
+          try {resolve(parseResponse(typeof r.response==='string'?JSON.parse(r.response):r.response));}
+          catch(err){reject(err);}
         },
         onerror:()=>reject(new Error('字幕APIに接続できません')),
         ontimeout:()=>reject(new Error('字幕APIがタイムアウトしました')),
@@ -98,6 +144,7 @@
     if (!payload||payload.code!==0||!payload.data) throw new Error(description+' (code '+(payload?.code??'?')+')');
     return payload.data;
   }
+
   function currentVideo() {
     const match=location.pathname.match(/^\/video\/(BV[0-9A-Za-z]{10})/i);
     if(!match)return null;
@@ -110,16 +157,19 @@
   }
   function imageKey(url) {return String(url||'').split('/').pop().split('.')[0];}
   async function signedQuery(params) {
-    const nav=await json('https://api.bilibili.com/x/web-interface/nav');
-    const info=nav?.data?.wbi_img;
-    if(!info?.img_url||!info?.sub_url)throw new Error('WBI署名キーの取得に失敗（Bilibiliログインを確認）');
-    const original=imageKey(info.img_url)+imageKey(info.sub_url);
-    if(original.length<64)throw new Error('WBI署名キーが不正です');
-    const mixin=shuffle.map(i=>original[i]).join('').slice(0,32);
+    if(!state.wbiKey||Date.now()-state.wbiKey.at>30*60*1000) {
+      const nav=await json('https://api.bilibili.com/x/web-interface/nav');
+      const info=nav?.data?.wbi_img;
+      if(!info?.img_url||!info?.sub_url)throw new Error('WBI署名キーの取得に失敗（Bilibiliログインを確認）');
+      const original=imageKey(info.img_url)+imageKey(info.sub_url);
+      if(original.length<64)throw new Error('WBI署名キーが不正です');
+      state.wbiKey={at:Date.now(),key:shuffle.map(i=>original[i]).join('').slice(0,32)};
+    }
     const values={...params,wts:Math.floor(Date.now()/1000)};
     const query=Object.keys(values).sort().map(k=>encodeURIComponent(k)+'='+encodeURIComponent(String(values[k]).replace(/[!'()*]/g,''))).join('&');
-    return query+'&w_rid='+md5(query+mixin);
+    return query+'&w_rid='+md5(query+state.wbiKey.key);
   }
+
   function language(code) {
     const name=String(code||'').toLowerCase();
     if(/^(en)([-_]|$)/.test(name))return 'en';
@@ -131,38 +181,144 @@
     if(!Array.isArray(body))return [];
     return body.filter(x=>typeof x.content==='string'&&Number.isFinite(Number(x.from))&&Number.isFinite(Number(x.to))&&Number(x.to)>Number(x.from)).map(x=>({from:Number(x.from),to:Number(x.to),content:x.content.trim()})).filter(x=>x.content).sort((a,b)=>a.from-b.from);
   }
-  async function acquire(bvid,page,generation) {
-    status('字幕一覧を取得中…');
-    const video=data(await json('https://api.bilibili.com/x/web-interface/view?bvid='+encodeURIComponent(bvid)),'動画情報の取得に失敗');
-    if(generation!==state.generation)return;
+  function pageMetadata(bvid,page) {
+    const video=globalThis.__INITIAL_STATE__?.videoData;
+    if(String(video?.bvid)!==bvid)return null; // reject stale SPA metadata
     const selected=video.pages?.[page-1];
-    if(!selected?.cid||!video.aid)throw new Error('この分割動画のCIDが見つかりません');
-    const query=await signedQuery({aid:video.aid,cid:selected.cid});
-    const player=data(await json('https://api.bilibili.com/x/player/wbi/v2?'+query),'署名付き字幕APIが利用できません');
-    if(generation!==state.generation)return;
-    const entries=player.subtitle?.subtitles;
-    if(!Array.isArray(entries)||entries.length===0)throw new Error('字幕一覧が空です（字幕なし／ログイン制限の可能性）');
+    const cid=selected?.cid??(page===1?video.cid:null);
+    if(!cid||!video.aid)return null;
+    return {aid:video.aid,cid,subtitle:video.subtitle};
+  }
+  function entriesFromMetadata(metadata) {
+    const subtitle=metadata?.subtitle;
+    const entries=Array.isArray(subtitle?.list)?subtitle.list:
+      Array.isArray(subtitle?.subtitles)?subtitle.subtitles:[];
+    return entries.filter(e=>e?.subtitle_url);
+  }
+  function selectEntries(entries) {
+    // Fetch only the tracks needed to support the current display mode.
+    const valid=entries.filter(e=>e?.subtitle_url);
+    const pick=lang=>valid.find(e=>language(e.lan)===lang);
+    const source=pick('zh')||pick('ja')||pick('en')||valid[0];
+    const wanted=state.mode==='both'?['en','ja']:state.mode==='ja'?['ja']:['en'];
+    const chosen=[];
+    for(const entry of [...wanted.map(pick),source]) {
+      if(entry&&!chosen.includes(entry))chosen.push(entry);
+    }
+    return chosen.slice(0,3);
+  }
+  async function downloadTracks(entries,generation) {
     const tracks=[];
-    for(const entry of entries.slice(0,10)) {
+    for(const entry of selectEntries(entries)) {
       try {
-        if(!entry.subtitle_url)continue;
         const uri=new URL(String(entry.subtitle_url).startsWith('//')?'https:'+entry.subtitle_url:entry.subtitle_url,'https://www.bilibili.com');
         if(uri.protocol!=='https:'||!allowed.test(uri.hostname))continue;
         const payload=await json(uri.href);
-        if(generation!==state.generation)return;
+        if(generation!==state.generation)return null;
         const items=cues(payload?.body);
         if(items.length)tracks.push({lang:language(entry.lan),label:entry.lan_doc||entry.lan,items});
-      } catch(error) {console.warn('[Bili Dual] 字幕トラックをスキップ:',error);}
+      } catch(error) {
+        // Do not attempt remaining tracks if access has been restricted.
+        if(Date.now()<(Number(GM_getValue(BLOCK_KEY,0))||0))throw error;
+        console.warn('[Bili Dual] 字幕トラックをスキップ:',error);
+      }
     }
-    if(!tracks.length)throw new Error('字幕本文を取得できません（権限や地域を確認）');
+    return tracks;
+  }
+  function releaseNative() {
+    if(state.nativeHolder?.isConnected)state.nativeHolder.style.opacity=state.nativeOpacity;
+    state.nativeHolder=null;state.nativeText='';
+  }
+  function nativeCaption() {
+    const element=document.querySelector('.bpx-player-subtitle-panel-text');
+    if(!element||state.root?.contains(element))return null;
+    const holder=element.closest('.bpx-player-subtitle-panel-position')||element;
+    if(getComputedStyle(holder).display==='none'||getComputedStyle(holder).visibility==='hidden')return null;
+    const content=(element.textContent||'').trim();
+    if(!content||content.length>500)return null;
+    const lang=/[\u3040-\u30ff]/.test(content)?'ja':/[\u4e00-\u9fff]/.test(content)?'zh':/[a-z]/i.test(content)?'en':null;
+    return lang?{content,lang,holder}:null;
+  }
+  function followNativeCaption() {
+    if(!state.source?.native||!state.video)return;
+    const found=nativeCaption();
+    if(!found) {
+      state.caption?.replaceChildren();state.painted='';
+      return;
+    }
+    if(state.nativeHolder!==found.holder) {
+      releaseNative();state.nativeHolder=found.holder;state.nativeOpacity=found.holder.style.opacity;
+    }
+    state.nativeHolder.style.opacity=state.enabled?'0':state.nativeOpacity;
+    const time=state.video.currentTime;
+    const current=state.source.items[0];
+    if(!current||current.content!==found.content) {
+      state.source.lang=found.lang;
+      state.source.items=[{from:time-.25,to:time+2,content:found.content}];
+      state.painted='';
+    } else {
+      current.from=time-.25;current.to=time+2;
+    }
+  }
+  function setTracks(tracks,origin) {
     state.english=tracks.find(t=>t.lang==='en')||null;
     state.japanese=tracks.find(t=>t.lang==='ja')||null;
     state.source=tracks.find(t=>t.lang==='zh')||state.english||state.japanese||tracks[0];
     state.translateEpoch++;state.cache.clear();state.pending.clear();state.painted='';
     updateTranslationStatus();
-    status('字幕: '+tracks.map(t=>t.label).join(' / '));
+    status('字幕: '+origin+' ('+tracks.map(t=>t.label).join(' / ')+')');
     render();
   }
+  async function acquire(bvid,page,generation) {
+    const pageKey=bvid+'/'+page;
+    const cached=cachedTracks(pageKey);
+    if(cached) {setTracks(cached,'キャッシュ');return;}
+    status('プレイヤー字幕を確認中…');
+    const metadata=pageMetadata(bvid,page);
+    // Existing subtitle text requires no additional network request.
+    // Check briefly while the player finishes mounting, without touching its APIs.
+    for(let i=0;i<4;i++) {
+      if(generation!==state.generation)return;
+      const native=nativeCaption();
+      if(native&&state.video) {
+        state.source={native:true,lang:native.lang,label:'Bilibili表示字幕',items:[]};
+        state.english=null;state.japanese=null;
+        state.nativeHolder=native.holder;state.nativeOpacity=native.holder.style.opacity;
+        followNativeCaption();
+        updateTranslationStatus();status('字幕: プレイヤーの表示字幕（追加API通信なし）');
+        render();return;
+      }
+      if(i<3)await new Promise(resolve=>setTimeout(resolve,350));
+    }
+    if(generation!==state.generation)return;
+    let tracks=[];
+    const embedded=entriesFromMetadata(metadata);
+    if(embedded.length) {
+      status('ページに含まれる字幕情報を再利用中…');
+      tracks=await downloadTracks(embedded,generation);
+    }
+    if(generation!==state.generation)return;
+    if(!tracks?.length) {
+      status('必要な字幕だけを取得中…');
+      let video=metadata;
+      if(!video) {
+        video=data(await json('https://api.bilibili.com/x/web-interface/view?bvid='+encodeURIComponent(bvid)),'動画情報の取得に失敗');
+        video={aid:video.aid,cid:video.pages?.[page-1]?.cid};
+      }
+      if(!video?.aid||!video?.cid)throw new Error('この分割動画のCIDが見つかりません');
+      const query=await signedQuery({aid:video.aid,cid:video.cid});
+      const player=data(await json('https://api.bilibili.com/x/player/wbi/v2?'+query),'署名付き字幕APIが利用できません');
+      if(generation!==state.generation)return;
+      const entries=player.subtitle?.subtitles;
+      if(!Array.isArray(entries)||entries.length===0)throw new Error('字幕一覧が空です（字幕なし／ログイン制限の可能性）');
+      tracks=await downloadTracks(entries,generation);
+    }
+    if(generation!==state.generation)return;
+    if(!tracks?.length)throw new Error('字幕本文を取得できません（権限や地域を確認）');
+    saveTracks(pageKey,tracks);
+    setTracks(tracks,'取得済み');
+  }
+
   function matchCue(track,time) {
     if(!track?.items?.length)return null;
     const items=track.items;
@@ -356,6 +512,7 @@
 
   function enable(value) {
     state.enabled=value;GM_setValue('dual-enabled',value);
+    if(state.nativeHolder?.isConnected)state.nativeHolder.style.opacity=value?'0':state.nativeOpacity;
     if(state.button) {
       state.button.textContent=value?'字幕 ON':'字幕 OFF';
       state.button.setAttribute('aria-pressed',String(value));
@@ -458,6 +615,7 @@
     const pageKey=video.bvid+'/'+video.page;
     if(!force&&pageKey===state.page)return;
     state.page=pageKey;state.generation++;
+    releaseNative();
     const generation=state.generation;
     state.source=null;state.english=null;state.japanese=null;
     state.translateEpoch++;state.cache.clear();state.pending.clear();state.painted='';
@@ -471,6 +629,7 @@
     const video=currentVideo();if(!video)return;
     const element=document.querySelector('.bpx-player-video-wrap video, #bilibili-player video, video');
     if(element)mount(element);
+    if(state.source?.native)followNativeCaption();
     if(state.source&&state.root?.isConnected)render();
     if(state.page!==video.bvid+'/'+video.page&&!state.loading) {
       state.loading=true;
