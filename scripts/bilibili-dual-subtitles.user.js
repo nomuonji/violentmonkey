@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bilibili Dual Subtitles (EN + JA)
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      0.6.0
-// @description  Bilibili標準字幕の旧/新DOMを検出。APIは手動取得時のみ、日英切替・位置調整対応。
+// @version      0.6.2
+// @description  Bilibili字幕の新旧DOMを認識。サンプル字幕・無関係な動画UIは検出せず、APIは手動取得のみ。
 // @author       nomuonji
 // @match        https://www.bilibili.com/video/*
 // @match        https://bilibili.com/video/*
@@ -263,6 +263,10 @@
   // Bilibili renders captions in several different DOM variants.
   // Query only dedicated caption containers, never menus, controls or danmaku.
   const NATIVE_CAPTION_SELECTORS = [
+    // Current Bilibili renderer: public subtitles userscripts inspect these nodes.
+    '.bili-subtitle-x-subtitle-panel-major-group .bili-subtitle-x-subtitle-panel-text',
+    '.bili-subtitle-x-subtitle-panel-minor-group .bili-subtitle-x-subtitle-panel-text',
+    // Legacy Bilibili player DOM.
     '.bpx-player-subtitle-panel-text',
     '.bpx-player-subtitle-panel-major-group',
     '.bpx-player-subtitle-panel-wrap .bpx-player-subtitle-item',
@@ -312,8 +316,9 @@
           count++;
           if(!visuallyAvailable(element))continue;
           const content=String(element.textContent||'').replace(/\s+/g,' ').trim();
-          if(!content||content.length>500)continue;
+          if(!content||content.length>500||/^(字幕样式测试|字幕樣式測試)$/.test(content))continue;
           const holder=element.closest?.(
+            '.bili-subtitle-x-subtitle-panel-wrap, '+
             '.bpx-player-subtitle-panel-position, '+
             '.bpx-player-subtitle-wrap, '+
             '.bpx-player-subtitle-panel-wrap, '+
@@ -329,7 +334,12 @@
         }
       }
     }
-    nativeDiagnostics(count?'字幕要素あり・表示テキスト待ち':'字幕DOMなし（標準字幕をONにし、再生中に確認）');
+
+    // The player can contain many unrelated text nodes (resolution controls,
+    // video timestamps, subtitle-style previews). Geometry alone is insufficient
+    // to identify real caption text and must never hide arbitrary player UI.
+    // Keep detection strictly scoped to known native subtitle containers.
+    nativeDiagnostics(count?'字幕要素あり・実字幕テキスト待ち':'字幕DOMなし（Bilibili新旧字幕コンテナ未検出）');
     return null;
   }
   function followNativeCaption() {
