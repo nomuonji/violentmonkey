@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bilibili Dual Subtitles (EN + JA)
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      0.6.1
-// @description  Bilibili標準字幕のDOMと動画内テキストを検出。APIは手動取得時のみ、日英切替・位置調整対応。
+// @version      0.6.2
+// @description  Bilibili字幕の新旧DOMを認識。サンプル字幕・無関係な動画UIは検出せず、APIは手動取得のみ。
 // @author       nomuonji
 // @match        https://www.bilibili.com/video/*
 // @match        https://bilibili.com/video/*
@@ -263,6 +263,10 @@
   // Bilibili renders captions in several different DOM variants.
   // Query only dedicated caption containers, never menus, controls or danmaku.
   const NATIVE_CAPTION_SELECTORS = [
+    // Current Bilibili renderer: public subtitles userscripts inspect these nodes.
+    '.bili-subtitle-x-subtitle-panel-major-group .bili-subtitle-x-subtitle-panel-text',
+    '.bili-subtitle-x-subtitle-panel-minor-group .bili-subtitle-x-subtitle-panel-text',
+    // Legacy Bilibili player DOM.
     '.bpx-player-subtitle-panel-text',
     '.bpx-player-subtitle-panel-major-group',
     '.bpx-player-subtitle-panel-wrap .bpx-player-subtitle-item',
@@ -312,8 +316,9 @@
           count++;
           if(!visuallyAvailable(element))continue;
           const content=String(element.textContent||'').replace(/\s+/g,' ').trim();
-          if(!content||content.length>500)continue;
+          if(!content||content.length>500||/^(字幕样式测试|字幕樣式測試)$/.test(content))continue;
           const holder=element.closest?.(
+            '.bili-subtitle-x-subtitle-panel-wrap, '+
             '.bpx-player-subtitle-panel-position, '+
             '.bpx-player-subtitle-wrap, '+
             '.bpx-player-subtitle-panel-wrap, '+
@@ -330,56 +335,11 @@
       }
     }
 
-    // Some player versions render the active subtitle as ordinary text inside
-    // the video surface without any of the dedicated caption classes above.
-    // Find that text by its position relative to the video, rather than by
-    // guessing another player-specific class name.
-    const videoRect=state.video?.getBoundingClientRect?.();
-    if(videoRect?.width>0&&videoRect?.height>0) {
-      const roots=[scope];
-      if(scope!==document&&document.fullscreenElement)roots.push(document);
-      const visitedRoots=new Set();
-      const visitedElements=new Set();
-      const candidates=[];
-      while(roots.length) {
-        const root=roots.shift();
-        if(!root||visitedRoots.has(root))continue;
-        visitedRoots.add(root);
-        for(const element of Array.from(root.children||[])) {
-          if(visitedElements.has(element)||state.root?.contains(element))continue;
-          visitedElements.add(element);
-          const rect=element.getBoundingClientRect?.();
-          if(!rect||rect.right<videoRect.left||rect.left>videoRect.right||rect.bottom<videoRect.top||rect.top>videoRect.bottom)continue;
-          if(element.shadowRoot)roots.push(element.shadowRoot);
-          roots.push(element);
-          if(!visuallyAvailable(element))continue;
-          const content=String(element.textContent||'').replace(/\s+/g,' ').trim();
-          if(!content||content.length>500)continue;
-          // Prefer the smallest element containing the text. Ancestor wrappers
-          // repeat textContent but have larger boxes and would hide UI siblings.
-          if(Array.from(element.children||[]).some(child=>
-            String(child.textContent||'').replace(/\s+/g,' ').trim()===content
-          ))continue;
-          if(rect.width>videoRect.width*.95||rect.height>videoRect.height*.25)continue;
-          const x=rect.left+rect.width/2;
-          const y=rect.top+rect.height/2;
-          if(x<videoRect.left+videoRect.width*.05||x>videoRect.right-videoRect.width*.05)continue;
-          if(y<videoRect.top+videoRect.height*.45||y>videoRect.bottom-videoRect.height*.02)continue;
-          candidates.push({element,content,area:rect.width*rect.height});
-        }
-      }
-      candidates.sort((a,b)=>a.area-b.area);
-      const candidate=candidates[0];
-      if(candidate) {
-        const lang=selectedNativeLanguage()||
-          (/[ぁ-ゟ゠-ヿ]/.test(candidate.content)?'ja':/[\u3400-\u9fff]/.test(candidate.content)?'zh':/[a-z]/i.test(candidate.content)?'en':null);
-        if(lang) {
-          nativeDiagnostics('動画内の表示テキスト（動画領域内のDOM）で検出');
-          return {content:candidate.content,lang,holder:candidate.element};
-        }
-      }
-    }
-    nativeDiagnostics(count?'字幕要素あり・表示テキスト待ち':'動画領域内の字幕DOMなし（canvas・閉じたShadow DOM等は取得不可）');
+    // The player can contain many unrelated text nodes (resolution controls,
+    // video timestamps, subtitle-style previews). Geometry alone is insufficient
+    // to identify real caption text and must never hide arbitrary player UI.
+    // Keep detection strictly scoped to known native subtitle containers.
+    nativeDiagnostics(count?'字幕要素あり・実字幕テキスト待ち':'字幕DOMなし（Bilibili新旧字幕コンテナ未検出）');
     return null;
   }
   function followNativeCaption() {
