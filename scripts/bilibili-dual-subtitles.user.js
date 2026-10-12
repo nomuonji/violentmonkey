@@ -1,15 +1,18 @@
 // ==UserScript==
 // @name         Bilibili Dual Subtitles (EN + JA)
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      0.1.0
-// @description  Bilibili の既存字幕を英語・日本語の2段で表示。Chrome内蔵翻訳を利用。
+// @version      0.2.0
+// @description  日英・日・英の字幕切替、字幕位置の調整、翻訳モデルの準備機能。
 // @author       nomuonji
 // @match        https://www.bilibili.com/video/*
 // @match        https://bilibili.com/video/*
 // @run-at       document-idle
+// @noframes
+// @inject-into  page
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_registerMenuCommand
 // @connect      api.bilibili.com
 // @connect      *.bilibili.com
 // @connect      *.hdslb.com
@@ -24,14 +27,20 @@
   // are trusted. Unsigned /x/player/v2 may return mismatched transcripts.
   const shuffle = [46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,28,14,39,12,38,41,13,37,48,7,16,24,55,40,61,26,17,0,1,60,51,30,4,22,25,54,21,56,59,6,63,57,62,11,36,20,34,44,52];
   const allowed = /(^|\.)(bilibili\.com|hdslb\.com)$/i;
+  const allowedModes = ['both','ja','en'];
+  const initialMode = GM_getValue('dual-mode', 'both');
   const state = {
     enabled: Boolean(GM_getValue('dual-enabled', true)),
+    mode: allowedModes.includes(initialMode) ? initialMode : 'both',
     original: Boolean(GM_getValue('dual-original', false)),
-    font: Number(GM_getValue('dual-font', 24)),
+    font: Math.max(16,Math.min(40,Number(GM_getValue('dual-font', 24))||24)),
+    bottom: Math.max(2,Math.min(60,Number(GM_getValue('dual-bottom', 11))||11)),
+    horizontal: Math.max(10,Math.min(90,Number(GM_getValue('dual-horizontal', 50))||50)),
     page: '', generation: 0, player: null, video: null, root: null, caption: null,
     status: '字幕を確認中…', statusElement: null, button: null,
     source: null, english: null, japanese: null,
-    cache: new Map(), pending: new Set(), translators: new Map(), painted: '',
+    cache: new Map(), pending: new Set(), translators: new Map(), probes: new Set(),
+    pairs: new Map(), painted: '', translateEpoch: 0,
   };
 
   // RFC 1321 MD5, with UTF-8 input. Required for Bilibili WBI signatures.
@@ -149,7 +158,8 @@
     state.english=tracks.find(t=>t.lang==='en')||null;
     state.japanese=tracks.find(t=>t.lang==='ja')||null;
     state.source=state.english||state.japanese||tracks.find(t=>t.lang==='zh')||tracks[0];
-    state.cache.clear();state.pending.clear();state.painted='';
+    state.translateEpoch++;state.cache.clear();state.pending.clear();state.painted='';
+    updateTranslationStatus();
     status('字幕: '+tracks.map(t=>t.label).join(' / '));
     render();
   }
@@ -167,37 +177,141 @@
     }
     return null;
   }
-  async function translator(from,to) {
-    const key=from+'>'+to;
-    if(!state.translators.has(key)) {
-      state.translators.set(key,(async()=>{
-        if(!globalThis.Translator?.availability||!globalThis.Translator?.create)throw new Error('ChromeのTranslator APIを利用できません');
-        const available=await globalThis.Translator.availability({sourceLanguage:from,targetLanguage:to});
-        if(available==='unavailable')throw new Error(from+'→'+to+'の翻訳モデルは利用できません');
-        return globalThis.Translator.create({sourceLanguage:from,targetLanguage:to});
-      })());
+  const ERROR = Symbol('translation-error');
+  const pairId = (from,to) => from+'>'+to;
+  const languageName = code => ({zh:'中国語',ja:'日本語',en:'英語'})[code] || code;
+
+  function translationError(error) {
+    const message=String(error?.message||error||'不明なエラー');
+    if(error?.name==='NotAllowedError')return '初回ダウンロードには「翻訳モデルを準備」をクリックしてください';
+    return message;
+  }
+  function setPair(pair,phase,message) {
+    state.pairs.set(pair,{phase,message});
+    updateTranslationStatus();
+    state.painted='';
+    render();
+  }
+  function requiredPairs() {
+    if(!state.source)return [];
+    const result=[];
+    const targets=state.mode==='both'?['en','ja']:[state.mode];
+    for(const target of targets) {
+      if((target==='en'?state.english:state.japanese)||state.source.lang===target)continue;
+      const key=pairId(state.source.lang,target);
+      if(!result.some(x=>x.key===key))result.push({key,from:state.source.lang,to:target});
     }
-    return state.translators.get(key);
+    return result;
+  }
+  function updateTranslationStatus() {
+    const el=state.root?.querySelector('.vm-dual-translation-status');
+    if(!el)return;
+    const pairs=requiredPairs();
+    if(!pairs.length) {el.textContent='選択中の言語は既存字幕から表示できます。';return;}
+    el.textContent=pairs.map(({key,from,to})=>{
+      const current=state.pairs.get(key);
+      const label=languageName(from)+' → '+languageName(to);
+      if(!current)return label+': 確認中';
+      return label+': '+current.message;
+    }).join(' / ');
+  }
+  function probe(from,to) {
+    const key=pairId(from,to);
+    if(state.probes.has(key)||state.translators.has(key))return;
+    state.probes.add(key);
+    if(!globalThis.Translator?.availability||!globalThis.Translator?.create) {
+      setPair(key,'error','Chrome内蔵翻訳が利用できません（Chrome 138以降のデスクトップ版が必要）');
+      return;
+    }
+    setPair(key,'checking','翻訳モデルを確認中…');
+    const options={sourceLanguage:from,targetLanguage:to};
+    Promise.resolve().then(()=>globalThis.Translator.availability(options)).then(availability=>{
+      if(state.translators.has(key))return;
+      if(availability==='available') {
+        startModel(from,to,false);
+      } else if(availability==='unavailable') {
+        setPair(key,'error','この言語ペアは利用できません');
+      } else {
+        setPair(key,'action','「翻訳モデルを準備」を押してください（初回ダウンロード）');
+      }
+    }).catch(err=>setPair(key,'error',translationError(err)));
+  }
+  function startModel(from,to,interactive) {
+    const key=pairId(from,to);
+    if(state.translators.has(key))return;
+    if(!globalThis.Translator?.create) {
+      setPair(key,'error','このブラウザにTranslator APIがありません');
+      return;
+    }
+    // Translator.create is deliberately invoked *synchronously* in the click
+    // handler when a language pack needs user activation.
+    try {
+      const options={
+        sourceLanguage:from,targetLanguage:to,
+        monitor(m) {
+          m.addEventListener('downloadprogress',e=>{
+            setPair(key,'loading','モデル取得 '+Math.round((e.loaded||0)*100)+'%');
+          });
+        },
+      };
+      setPair(key,'loading',interactive?'翻訳モデルの準備中…':'翻訳モデル起動中…');
+      const promise=globalThis.Translator.create(options);
+      state.translators.set(key,Promise.resolve(promise));
+      Promise.resolve(promise).then(()=>{
+        setPair(key,'ready','利用可能');
+      }).catch(err=>{
+        state.translators.delete(key);
+        setPair(key,'error',translationError(err));
+      });
+    } catch(err) {
+      state.translators.delete(key);
+      setPair(key,'error',translationError(err));
+    }
+  }
+  function prepareModels() {
+    const pairs=requiredPairs();
+    if(!pairs.length) {updateTranslationStatus();return;}
+    state.translateEpoch++;
+    state.cache.clear();state.pending.clear();
+    // All create() calls happen directly in the user-click call stack.
+    for(const {from,to,key} of pairs) {
+      if(state.pairs.get(key)?.phase==='ready'&&state.translators.has(key))continue;
+      state.translators.delete(key);
+      startModel(from,to,true);
+    }
+    state.painted='';render();
   }
   function translated(track,index,target,generation) {
     const source=track.items[index].content;
     if(track.lang===target)return source;
-    const key=track.lang+'>'+target+'#'+index+'#'+source;
-    if(state.cache.has(key))return state.cache.get(key);
+    const pair=pairId(track.lang,target);
+    const key=pair+'#'+index+'#'+source;
+    if(state.cache.has(key))return state.cache.get(key)===ERROR?'翻訳に失敗しました（字幕設定で詳細を確認）':state.cache.get(key);
+    const model=state.translators.get(pair);
+    if(!model) {
+      if(!state.pairs.has(pair))probe(track.lang,target);
+      const phase=state.pairs.get(pair)?.phase;
+      if(phase==='error')return '翻訳できません（字幕設定で詳細を確認）';
+      if(phase==='action')return '翻訳モデル未準備（字幕設定 → モデル準備）';
+      return '翻訳モデルを確認中…';
+    }
     if(!state.pending.has(key)) {
       state.pending.add(key);
-      translator(track.lang,target).then(model=>model.translate(source)).then(result=>{
-        if(generation!==state.generation)return;
-        state.cache.set(key,String(result||''));
+      const epoch=state.translateEpoch;
+      Promise.race([
+        Promise.resolve(model).then(instance=>instance.translate(source)),
+        new Promise((_,reject)=>setTimeout(()=>reject(new Error('翻訳が15秒以内に完了しませんでした')),15000)),
+      ]).then(result=>{
+        if(generation!==state.generation||epoch!==state.translateEpoch)return;
+        state.cache.set(key,String(result||'')||ERROR);
         state.pending.delete(key);render();
       }).catch(err=>{
-        if(generation!==state.generation)return;
-        state.cache.set(key,'');state.pending.delete(key);
-        status('翻訳不可: '+(err?.message||String(err)));
-        render();
+        if(generation!==state.generation||epoch!==state.translateEpoch)return;
+        state.cache.set(key,ERROR);state.pending.delete(key);
+        setPair(pair,'error',translationError(err));
       });
     }
-    return null;
+    return '翻訳中…';
   }
   function line(target,time,sourceCue,generation) {
     const native=target==='en'?state.english:state.japanese;
@@ -214,27 +328,49 @@
       if(state.painted!=='') {state.painted='';state.caption.replaceChildren();}
       return;
     }
-    const en=line('en',time,found,state.generation);
-    const ja=line('ja',time,found,state.generation);
-    const lines=[en||'English: 翻訳中…',ja||'日本語: 翻訳中…'];
-    if(state.original&&state.source.lang!=='en'&&state.source.lang!=='ja')lines.push(found.cue.content);
-    const signature=lines.join('\n')+'|'+state.font;
-    if(signature===state.painted)return;
-    state.painted=signature;
-    state.caption.replaceChildren(...lines.map((value,i)=>{
-      const el=document.createElement('div');el.className='vm-dual-line vm-dual-'+(i===0?'en':i===1?'ja':'original');el.textContent=value;return el;
+    const targets=state.mode==='both'?['en','ja']:[state.mode];
+    const lines=targets.map(target=>({
+      target, text:line(target,time,found,state.generation)||'字幕がありません',
     }));
-    // Look ahead only two segments to avoid sending a full transcript to the model.
+    if(state.original&&state.source.lang!=='en'&&state.source.lang!=='ja') {
+      lines.push({target:'original',text:found.cue.content});
+    }
+    const signature=lines.map(x=>x.target+':'+x.text).join('\n')+'|'+state.font+'|'+state.bottom+'|'+state.horizontal;
+    if(signature!==state.painted) {
+      state.painted=signature;
+      state.caption.replaceChildren(...lines.map(({target,text})=>{
+        const el=document.createElement('div');el.className='vm-dual-line vm-dual-'+target;
+        el.textContent=text;return el;
+      }));
+    }
+    // Preload at most two captions, only for selected display languages.
     for(let i=found.index+1;i<=Math.min(found.index+2,state.source.items.length-1);i++) {
-      if(!state.english)translated(state.source,i,'en',state.generation);
-      if(!state.japanese)translated(state.source,i,'ja',state.generation);
+      for(const target of targets) {
+        if(!(target==='en'?state.english:state.japanese))translated(state.source,i,target,state.generation);
+      }
     }
   }
+
   function enable(value) {
     state.enabled=value;GM_setValue('dual-enabled',value);
-    if(state.button) {state.button.textContent=value?'日英字幕 ON':'日英字幕 OFF';state.button.setAttribute('aria-pressed',String(value));}
+    if(state.button) {
+      state.button.textContent=value?'字幕 ON':'字幕 OFF';
+      state.button.setAttribute('aria-pressed',String(value));
+    }
     if(!value)state.caption?.replaceChildren();
     else {state.painted='';render();}
+  }
+  function openSettings() {
+    const options=state.root?.querySelector('.vm-dual-options');
+    if(options)options.hidden=false;
+  }
+  function updatePosition() {
+    if(!state.caption)return;
+    state.caption.style.bottom=state.bottom+'%';
+    state.caption.style.left=state.horizontal+'%';
+    state.caption.style.transform='translateX(-50%)';
+    state.root.querySelector('.vm-dual-bottom-label').textContent=state.bottom+'%';
+    state.root.querySelector('.vm-dual-horizontal-label').textContent=state.horizontal+'%';
   }
   function mount(video) {
     const player=video.closest('.bpx-player-container, #bilibili-player, .bilibili-player')||video.parentElement;
@@ -244,23 +380,75 @@
     if(getComputedStyle(player).position==='static')player.style.position='relative';
     if(!document.getElementById('vm-dual-style')) {
       const style=document.createElement('style');style.id='vm-dual-style';
-      style.textContent='#vm-dual-root{position:absolute;inset:0;z-index:75;pointer-events:none;color:#fff;font-family:Arial,"Noto Sans JP",sans-serif;--vm-font:24px}#vm-dual-root .vm-dual-tools{position:absolute;top:12px;right:12px;display:flex;gap:5px;opacity:.8;pointer-events:auto}#vm-dual-root .vm-dual-tools:hover{opacity:1}#vm-dual-root button{border:0;cursor:pointer;border-radius:7px;background:#202632ec;color:#fff;font-size:12px;padding:7px 10px}#vm-dual-root button:focus-visible{outline:2px solid #ffe188}#vm-dual-root .vm-dual-options{position:absolute;top:48px;right:12px;width:240px;max-width:calc(100% - 24px);box-sizing:border-box;padding:12px;border-radius:9px;border:1px solid #fff4;background:#141920f0;font-size:12px;pointer-events:auto}#vm-dual-root .vm-dual-options[hidden]{display:none}#vm-dual-root .vm-dual-options label{display:flex;align-items:center;gap:8px;margin-bottom:10px}#vm-dual-root .vm-dual-options input[type=range]{min-width:50px;flex:1}#vm-dual-root .vm-dual-status{opacity:.85;overflow-wrap:anywhere;margin-top:10px}#vm-dual-root .vm-dual-caption{position:absolute;left:2%;right:2%;bottom:11%;text-align:center;font-weight:700;font-size:var(--vm-font);line-height:1.35;text-shadow:0 2px 5px #000,0 0 2px #000;white-space:pre-wrap;overflow-wrap:anywhere}#vm-dual-root .vm-dual-line{display:table;max-width:98%;margin:2px auto;padding:1px 8px;border-radius:4px;background:#000a}#vm-dual-root .vm-dual-ja{color:#ffe494}#vm-dual-root .vm-dual-original{color:#ddd;font-size:.72em}@media(max-width:600px){#vm-dual-root .vm-dual-caption{font-size:clamp(14px,4vw,var(--vm-font))}}';
+      style.textContent=`
+#vm-dual-root{position:absolute;inset:0;z-index:75;pointer-events:none;color:#fff;font-family:Arial,"Noto Sans JP",sans-serif;--vm-font:24px}
+#vm-dual-root .vm-dual-tools{position:absolute;top:12px;right:12px;display:flex;gap:5px;pointer-events:auto}
+#vm-dual-root button{border:1px solid #ffffff40;cursor:pointer;border-radius:7px;background:#202632ed;color:#fff;font-size:12px;padding:7px 10px;white-space:nowrap}
+#vm-dual-root button:hover{background:#343b52}
+#vm-dual-root button:focus-visible,#vm-dual-root select:focus-visible{outline:2px solid #ffe188}
+#vm-dual-root .vm-dual-options{position:absolute;z-index:2;top:52px;right:12px;width:300px;max-width:calc(100% - 24px);box-sizing:border-box;padding:15px;border-radius:10px;border:1px solid #ffffff50;background:#141920f7;box-shadow:0 7px 22px #0009;color:#fff;font-size:13px;pointer-events:auto}
+#vm-dual-root .vm-dual-options[hidden]{display:none}
+#vm-dual-root .vm-dual-heading{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;font-weight:bold}
+#vm-dual-root .vm-dual-heading button{font-size:16px;padding:3px 9px}
+#vm-dual-root .vm-dual-options label{display:flex;align-items:center;gap:8px;margin:10px 0}
+#vm-dual-root .vm-dual-options input[type=range]{flex:1;min-width:40px}
+#vm-dual-root .vm-dual-options select{flex:1;border-radius:5px;border:1px solid #ffffff50;background:#242b35;color:#fff;padding:6px}
+#vm-dual-root .vm-dual-options .vm-dual-setting-label{width:66px;flex-shrink:0}
+#vm-dual-root .vm-dual-status,#vm-dual-root .vm-dual-translation-status{line-height:1.45;overflow-wrap:anywhere;margin-top:8px;font-size:12px;color:#d9dee6}
+#vm-dual-root .vm-dual-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+#vm-dual-root .vm-dual-caption{position:absolute;left:50%;width:96%;max-width:96%;bottom:11%;transform:translateX(-50%);text-align:center;font-weight:700;font-size:var(--vm-font);line-height:1.35;text-shadow:0 2px 5px #000,0 0 2px #000;white-space:pre-wrap;overflow-wrap:anywhere}
+#vm-dual-root .vm-dual-line{display:table;max-width:98%;margin:2px auto;padding:1px 8px;border-radius:4px;background:#000a}
+#vm-dual-root .vm-dual-ja{color:#ffe494}
+#vm-dual-root .vm-dual-original{color:#ddd;font-size:.72em}
+@media(max-width:600px){#vm-dual-root .vm-dual-caption{font-size:clamp(14px,4vw,var(--vm-font))}#vm-dual-root .vm-dual-tools{top:4px;right:4px}#vm-dual-root button{padding:5px 7px}}
+`;
       (document.head||document.documentElement).appendChild(style);
     }
     const root=document.createElement('div');root.id='vm-dual-root';
-    root.innerHTML='<div class="vm-dual-tools"><button class="vm-dual-toggle" type="button"></button><button class="vm-dual-config" type="button" aria-label="字幕設定">⚙</button></div><div class="vm-dual-options" hidden><label><input type="checkbox" class="vm-dual-original-setting">原文も表示</label><label>文字サイズ <input type="range" class="vm-dual-font-setting" min="16" max="40" step="2"></label><button class="vm-dual-retry" type="button">字幕を再取得</button><div class="vm-dual-status" role="status"></div></div><div class="vm-dual-caption"></div>';
+    root.innerHTML=`
+<div class="vm-dual-tools">
+  <button class="vm-dual-toggle" type="button"></button>
+  <button class="vm-dual-config" type="button" aria-label="字幕設定">字幕設定 ⚙</button>
+</div>
+<div class="vm-dual-options" hidden>
+  <div class="vm-dual-heading"><span>字幕設定</span><button class="vm-dual-close" type="button" aria-label="閉じる">×</button></div>
+  <label><span class="vm-dual-setting-label">表示</span><select class="vm-dual-mode">
+    <option value="both">英語＋日本語</option><option value="ja">日本語のみ</option><option value="en">英語のみ</option>
+  </select></label>
+  <label><span class="vm-dual-setting-label">上下位置</span><input type="range" class="vm-dual-bottom" min="2" max="60" step="1"><span class="vm-dual-bottom-label"></span></label>
+  <label><span class="vm-dual-setting-label">左右位置</span><input type="range" class="vm-dual-horizontal" min="10" max="90" step="1"><span class="vm-dual-horizontal-label"></span></label>
+  <label><span class="vm-dual-setting-label">文字サイズ</span><input type="range" class="vm-dual-font-setting" min="16" max="40" step="2"></label>
+  <label><input type="checkbox" class="vm-dual-original-setting">中国語原文も表示</label>
+  <div class="vm-dual-actions"><button class="vm-dual-prepare" type="button">翻訳モデルを準備</button><button class="vm-dual-retry" type="button">字幕を再取得</button></div>
+  <div class="vm-dual-translation-status" role="status"></div>
+  <div class="vm-dual-status" role="status"></div>
+</div>
+<div class="vm-dual-caption"></div>`;
     player.appendChild(root);
     state.root=root;state.caption=root.querySelector('.vm-dual-caption');state.button=root.querySelector('.vm-dual-toggle');state.statusElement=root.querySelector('.vm-dual-status');
     state.button.addEventListener('click',()=>enable(!state.enabled));
     root.querySelector('.vm-dual-config').addEventListener('click',()=>{const panel=root.querySelector('.vm-dual-options');panel.hidden=!panel.hidden;});
-    const original=root.querySelector('.vm-dual-original-setting');
-    original.checked=state.original;
+    root.querySelector('.vm-dual-close').addEventListener('click',()=>{root.querySelector('.vm-dual-options').hidden=true;});
+    const mode=root.querySelector('.vm-dual-mode');mode.value=state.mode;
+    mode.addEventListener('change',()=>{
+      if(!allowedModes.includes(mode.value))return;
+      state.mode=mode.value;GM_setValue('dual-mode',state.mode);
+      state.painted='';updateTranslationStatus();render();
+    });
+    const original=root.querySelector('.vm-dual-original-setting');original.checked=state.original;
     original.addEventListener('change',()=>{state.original=original.checked;GM_setValue('dual-original',state.original);state.painted='';render();});
-    const slider=root.querySelector('.vm-dual-font-setting');slider.value=String(state.font);
-    slider.addEventListener('input',()=>{state.font=Number(slider.value);GM_setValue('dual-font',state.font);root.style.setProperty('--vm-font',state.font+'px');state.painted='';render();});
+    const font=root.querySelector('.vm-dual-font-setting');font.value=String(state.font);
+    font.addEventListener('input',()=>{state.font=Number(font.value);GM_setValue('dual-font',state.font);root.style.setProperty('--vm-font',state.font+'px');state.painted='';render();});
+    const bottom=root.querySelector('.vm-dual-bottom');bottom.value=String(state.bottom);
+    bottom.addEventListener('input',()=>{state.bottom=Number(bottom.value);GM_setValue('dual-bottom',state.bottom);updatePosition();});
+    const horizontal=root.querySelector('.vm-dual-horizontal');horizontal.value=String(state.horizontal);
+    horizontal.addEventListener('input',()=>{state.horizontal=Number(horizontal.value);GM_setValue('dual-horizontal',state.horizontal);updatePosition();});
+    root.querySelector('.vm-dual-prepare').addEventListener('click',prepareModels);
     root.querySelector('.vm-dual-retry').addEventListener('click',()=>refresh(true));
-    root.style.setProperty('--vm-font',state.font+'px');status(state.status);enable(state.enabled);
+    root.style.setProperty('--vm-font',state.font+'px');updatePosition();
+    status(state.status);updateTranslationStatus();enable(state.enabled);
   }
+
   async function refresh(force=false) {
     const video=currentVideo();if(!video)return;
     const pageKey=video.bvid+'/'+video.page;
@@ -268,7 +456,7 @@
     state.page=pageKey;state.generation++;
     const generation=state.generation;
     state.source=null;state.english=null;state.japanese=null;
-    state.cache.clear();state.pending.clear();state.translators.clear();state.painted='';
+    state.translateEpoch++;state.cache.clear();state.pending.clear();state.painted='';
     state.caption?.replaceChildren();
     try {await acquire(video.bvid,video.page,generation);}
     catch(error) {
@@ -285,5 +473,6 @@
       refresh().finally(()=>{state.loading=false;});
     }
   }
+  if(typeof GM_registerMenuCommand==='function')GM_registerMenuCommand('Bilibili 字幕設定を開く',()=>{tick();openSettings();});
   tick();setInterval(tick,750);
 })();
