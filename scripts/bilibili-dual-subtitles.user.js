@@ -157,7 +157,7 @@
     if(!tracks.length)throw new Error('字幕本文を取得できません（権限や地域を確認）');
     state.english=tracks.find(t=>t.lang==='en')||null;
     state.japanese=tracks.find(t=>t.lang==='ja')||null;
-    state.source=state.english||state.japanese||tracks.find(t=>t.lang==='zh')||tracks[0];
+    state.source=tracks.find(t=>t.lang==='zh')||state.english||state.japanese||tracks[0];
     state.translateEpoch++;state.cache.clear();state.pending.clear();state.painted='';
     updateTranslationStatus();
     status('字幕: '+tracks.map(t=>t.label).join(' / '));
@@ -207,6 +207,7 @@
     const el=state.root?.querySelector('.vm-dual-translation-status');
     if(!el)return;
     const pairs=requiredPairs();
+    if(!state.source) {el.textContent='字幕の取得待ちです。';return;}
     if(!pairs.length) {el.textContent='選択中の言語は既存字幕から表示できます。';return;}
     el.textContent=pairs.map(({key,from,to})=>{
       const current=state.pairs.get(key);
@@ -370,6 +371,7 @@
     if(!state.caption)return;
     state.caption.style.bottom=state.bottom+'%';
     state.caption.style.left=state.horizontal+'%';
+    state.caption.style.width=Math.min(96,2*Math.min(state.horizontal,100-state.horizontal))+'%';
     state.caption.style.transform='translateX(-50%)';
     state.root.querySelector('.vm-dual-bottom-label').textContent=state.bottom+'%';
     state.root.querySelector('.vm-dual-horizontal-label').textContent=state.horizontal+'%';
