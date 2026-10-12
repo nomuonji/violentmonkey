@@ -337,7 +337,7 @@
     const videoRect=state.video?.getBoundingClientRect?.();
     if(videoRect?.width>0&&videoRect?.height>0) {
       const roots=[scope];
-      if(scope!==document)roots.push(document);
+      if(scope!==document&&document.fullscreenElement)roots.push(document);
       const visitedRoots=new Set();
       const visitedElements=new Set();
       const candidates=[];
