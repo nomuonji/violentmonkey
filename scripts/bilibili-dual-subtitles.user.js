@@ -288,13 +288,15 @@
     const key=pair+'#'+index+'#'+source;
     if(state.cache.has(key))return state.cache.get(key)===ERROR?'翻訳に失敗しました（字幕設定で詳細を確認）':state.cache.get(key);
     const model=state.translators.get(pair);
+    const phase=state.pairs.get(pair)?.phase;
     if(!model) {
       if(!state.pairs.has(pair))probe(track.lang,target);
-      const phase=state.pairs.get(pair)?.phase;
       if(phase==='error')return '翻訳できません（字幕設定で詳細を確認）';
       if(phase==='action')return '翻訳モデル未準備（字幕設定 → モデル準備）';
       return '翻訳モデルを確認中…';
     }
+    if(phase==='loading'||phase==='checking')return '翻訳モデルの準備中…';
+    if(phase==='error')return '翻訳できません（字幕設定で詳細を確認）';
     if(!state.pending.has(key)) {
       state.pending.add(key);
       const epoch=state.translateEpoch;
