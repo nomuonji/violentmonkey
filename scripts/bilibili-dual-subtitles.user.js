@@ -201,11 +201,11 @@
     const pick=lang=>valid.find(e=>language(e.lan)===lang);
     const source=pick('zh')||pick('ja')||pick('en')||valid[0];
     const wanted=state.mode==='both'?['en','ja']:state.mode==='ja'?['ja']:['en'];
-    const chosen=[];
-    for(const entry of [...wanted.map(pick),source]) {
-      if(entry&&!chosen.includes(entry))chosen.push(entry);
-    }
-    return chosen.slice(0,3);
+    const native=wanted.map(pick).filter(Boolean);
+    const missing=wanted.some(lang=>!pick(lang));
+    // If the requested subtitles already exist, don't fetch Chinese as well.
+    const chosen=(missing||state.original||!native.length)?[...native,source]:native;
+    return [...new Set(chosen.filter(Boolean))].slice(0,3);
   }
   async function downloadTracks(entries,generation) {
     const tracks=[];
