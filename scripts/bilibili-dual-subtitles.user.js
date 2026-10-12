@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili Dual Subtitles (EN + JA)
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      0.3.0
+// @version      0.4.0
 // @description  プレイヤー字幕優先・必要最小限の取得・キャッシュ・取得制限時の停止に対応した日英字幕。
 // @author       nomuonji
 // @match        https://www.bilibili.com/video/*
@@ -42,6 +42,7 @@
     cache: new Map(), pending: new Set(), translators: new Map(), probes: new Set(),
     pairs: new Map(), painted: '', translateEpoch: 0,
     wbiKey: null, nativeHolder: null, nativeOpacity: '', nativeText: '',
+    network: {total:0, api:0, subtitles:0, failed:0}, sourceLabel: '確認中',
   };
 
   // RFC 1321 MD5, with UTF-8 input. Required for Bilibili WBI signatures.
@@ -117,6 +118,28 @@
     if([-352,-412].includes(payload?.code))haltRemote('API code '+payload.code);
     return payload;
   }
+  function setSourceLabel(value) {
+    state.sourceLabel=value;
+    updateNetworkUI();
+  }
+  function updateNetworkUI() {
+    const total=state.network.total;
+    const pill=state.root?.querySelector('.vm-dual-network-indicator');
+    if(pill) {
+      pill.textContent='追加通信 '+total+'件';
+      pill.title='この動画でスクリプトが発行した追加リクエスト（Bilibili本体の通信は含まれません）';
+    }
+    const detail=state.root?.querySelector('.vm-dual-network-detail');
+    if(detail)detail.textContent=
+      '取得元: '+state.sourceLabel+' ／ 追加通信: '+total+'件（API '+state.network.api+
+      '・字幕本文 '+state.network.subtitles+'）'+
+      (state.network.failed?' ／ HTTP失敗 '+state.network.failed+'件':'')+
+      '。Bilibili本体が行った通信は計上しません。';
+  }
+  function resetNetwork() {
+    state.network={total:0,api:0,subtitles:0,failed:0};
+    setSourceLabel('確認中');
+  }
   function json(url) {
     return new Promise((resolve,reject)=>{
       const target=new URL(url, location.origin);
@@ -124,10 +147,16 @@
         reject(new Error('許可されていない字幕URL')); return;
       }
       try {assertRemoteAllowed();}catch(err){reject(err);return;}
+      // Count requests actually initiated by this userscript, not Chrome/Bilibili traffic.
+      const isApi=target.hostname==='api.bilibili.com';
+      state.network.total++;
+      state.network[isApi?'api':'subtitles']++;
+      updateNetworkUI();
       GM_xmlhttpRequest({
         method:'GET',url:target.href,responseType:'json',timeout:15000,anonymous:false,
         headers:{Accept:'application/json'},
         onload:r=>{
+          if(r.status<200||r.status>=300) {state.network.failed++;updateNetworkUI();}
           if([412,429].includes(r.status)) {
             try {haltRemote('HTTP '+r.status);}catch(err){reject(err);}return;
           }
@@ -135,8 +164,8 @@
           try {resolve(parseResponse(typeof r.response==='string'?JSON.parse(r.response):r.response));}
           catch(err){reject(err);}
         },
-        onerror:()=>reject(new Error('字幕APIに接続できません')),
-        ontimeout:()=>reject(new Error('字幕APIがタイムアウトしました')),
+        onerror:()=>{state.network.failed++;updateNetworkUI();reject(new Error('字幕APIに接続できません'));},
+        ontimeout:()=>{state.network.failed++;updateNetworkUI();reject(new Error('字幕APIがタイムアウトしました'));},
       });
     });
   }
@@ -210,6 +239,7 @@
   async function downloadTracks(entries,generation) {
     const tracks=[];
     for(const entry of selectEntries(entries)) {
+      if(generation!==state.generation)return null;
       try {
         const uri=new URL(String(entry.subtitle_url).startsWith('//')?'https:'+entry.subtitle_url:entry.subtitle_url,'https://www.bilibili.com');
         if(uri.protocol!=='https:'||!allowed.test(uri.hostname))continue;
@@ -261,19 +291,36 @@
       current.from=time-.25;current.to=time+2;
     }
   }
+  function switchToNative(found) {
+    if(!found||!state.video)return false;
+    // A later Bilibili subtitle toggle can supersede API/cached tracks.
+    // Increment generation so previously scheduled subtitle fetches stop between requests.
+    state.generation++;
+    releaseNative();
+    state.source={native:true,lang:found.lang,label:'Bilibili表示字幕',items:[]};
+    state.english=null;state.japanese=null;
+    state.nativeHolder=found.holder;state.nativeOpacity=found.holder.style.opacity;
+    state.translateEpoch++;state.cache.clear();state.pending.clear();state.painted='';
+    followNativeCaption();
+    setSourceLabel('プレイヤー表示字幕（追加取得なし）');
+    status('字幕: プレイヤーで表示中の字幕を利用');
+    updateTranslationStatus();render();
+    return true;
+  }
   function setTracks(tracks,origin) {
     state.english=tracks.find(t=>t.lang==='en')||null;
     state.japanese=tracks.find(t=>t.lang==='ja')||null;
     state.source=tracks.find(t=>t.lang==='zh')||state.english||state.japanese||tracks[0];
     state.translateEpoch++;state.cache.clear();state.pending.clear();state.painted='';
     updateTranslationStatus();
+    setSourceLabel(origin);
     status('字幕: '+origin+' ('+tracks.map(t=>t.label).join(' / ')+')');
     render();
   }
   async function acquire(bvid,page,generation) {
     const pageKey=bvid+'/'+page;
     const cached=cachedTracks(pageKey);
-    if(cached) {setTracks(cached,'キャッシュ');return;}
+    if(cached) {setTracks(cached,'ローカルキャッシュ（追加取得なし）');return;}
     status('プレイヤー字幕を確認中…');
     const metadata=pageMetadata(bvid,page);
     // Existing subtitle text requires no additional network request.
@@ -282,12 +329,8 @@
       if(generation!==state.generation)return;
       const native=nativeCaption();
       if(native&&state.video) {
-        state.source={native:true,lang:native.lang,label:'Bilibili表示字幕',items:[]};
-        state.english=null;state.japanese=null;
-        state.nativeHolder=native.holder;state.nativeOpacity=native.holder.style.opacity;
-        followNativeCaption();
-        updateTranslationStatus();status('字幕: プレイヤーの表示字幕（追加API通信なし）');
-        render();return;
+        switchToNative(native);
+        return;
       }
       if(i<3)await new Promise(resolve=>setTimeout(resolve,350));
     }
@@ -297,6 +340,7 @@
     if(embedded.length) {
       status('ページに含まれる字幕情報を再利用中…');
       tracks=await downloadTracks(embedded,generation);
+      if(tracks?.length)setSourceLabel('ページ埋込の字幕URL');
     }
     if(generation!==state.generation)return;
     if(!tracks?.length) {
@@ -306,18 +350,21 @@
         video=data(await json('https://api.bilibili.com/x/web-interface/view?bvid='+encodeURIComponent(bvid)),'動画情報の取得に失敗');
         video={aid:video.aid,cid:video.pages?.[page-1]?.cid};
       }
+      if(generation!==state.generation)return;
       if(!video?.aid||!video?.cid)throw new Error('この分割動画のCIDが見つかりません');
       const query=await signedQuery({aid:video.aid,cid:video.cid});
+      if(generation!==state.generation)return;
       const player=data(await json('https://api.bilibili.com/x/player/wbi/v2?'+query),'署名付き字幕APIが利用できません');
       if(generation!==state.generation)return;
       const entries=player.subtitle?.subtitles;
       if(!Array.isArray(entries)||entries.length===0)throw new Error('字幕一覧が空です（字幕なし／ログイン制限の可能性）');
       tracks=await downloadTracks(entries,generation);
+      if(tracks?.length)setSourceLabel('署名付きBilibili字幕API');
     }
     if(generation!==state.generation)return;
     if(!tracks?.length)throw new Error('字幕本文を取得できません（権限や地域を確認）');
     saveTracks(pageKey,tracks);
-    setTracks(tracks,'取得済み');
+    setTracks(tracks,embedded.length&&tracks?.length&&state.sourceLabel==='ページ埋込の字幕URL'?'ページ埋込の字幕URL':'署名付きBilibili字幕API');
   }
 
   function matchCue(track,time) {
@@ -544,7 +591,8 @@
       const style=document.createElement('style');style.id='vm-dual-style';
       style.textContent=`
 #vm-dual-root{position:absolute;inset:0;z-index:75;pointer-events:none;color:#fff;font-family:Arial,"Noto Sans JP",sans-serif;--vm-font:24px}
-#vm-dual-root .vm-dual-tools{position:absolute;top:12px;right:12px;display:flex;gap:5px;pointer-events:auto}
+#vm-dual-root .vm-dual-tools{position:absolute;top:12px;right:12px;display:flex;gap:5px;align-items:center;pointer-events:auto}
+#vm-dual-root .vm-dual-network-indicator{padding:5px 8px;border-radius:7px;background:#202632ed;color:#dce9f9;font-size:11px;white-space:nowrap;text-shadow:0 1px 3px #000}
 #vm-dual-root button{border:1px solid #ffffff40;cursor:pointer;border-radius:7px;background:#202632ed;color:#fff;font-size:12px;padding:7px 10px;white-space:nowrap}
 #vm-dual-root button:hover{background:#343b52}
 #vm-dual-root button:focus-visible,#vm-dual-root select:focus-visible{outline:2px solid #ffe188}
@@ -556,7 +604,7 @@
 #vm-dual-root .vm-dual-options input[type=range]{flex:1;min-width:40px}
 #vm-dual-root .vm-dual-options select{flex:1;border-radius:5px;border:1px solid #ffffff50;background:#242b35;color:#fff;padding:6px}
 #vm-dual-root .vm-dual-options .vm-dual-setting-label{width:66px;flex-shrink:0}
-#vm-dual-root .vm-dual-status,#vm-dual-root .vm-dual-translation-status{line-height:1.45;overflow-wrap:anywhere;margin-top:8px;font-size:12px;color:#d9dee6}
+#vm-dual-root .vm-dual-status,#vm-dual-root .vm-dual-translation-status,#vm-dual-root .vm-dual-network-detail{line-height:1.45;overflow-wrap:anywhere;margin-top:8px;font-size:12px;color:#d9dee6}
 #vm-dual-root .vm-dual-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
 #vm-dual-root .vm-dual-caption{position:absolute;left:50%;width:96%;max-width:96%;bottom:11%;transform:translateX(-50%);text-align:center;font-weight:700;font-size:var(--vm-font);line-height:1.35;text-shadow:0 2px 5px #000,0 0 2px #000;white-space:pre-wrap;overflow-wrap:anywhere}
 #vm-dual-root .vm-dual-line{display:table;max-width:98%;margin:2px auto;padding:1px 8px;border-radius:4px;background:#000a}
@@ -569,6 +617,7 @@
     const root=document.createElement('div');root.id='vm-dual-root';
     root.innerHTML=`
 <div class="vm-dual-tools">
+  <span class="vm-dual-network-indicator" role="status" aria-live="polite">追加通信 0件</span>
   <button class="vm-dual-toggle" type="button"></button>
   <button class="vm-dual-config" type="button" aria-label="字幕設定">字幕設定 ⚙</button>
 </div>
@@ -582,6 +631,7 @@
   <label><span class="vm-dual-setting-label">文字サイズ</span><input type="range" class="vm-dual-font-setting" min="16" max="40" step="2"></label>
   <label><input type="checkbox" class="vm-dual-original-setting">中国語原文も表示</label>
   <div class="vm-dual-actions"><button class="vm-dual-prepare" type="button">翻訳モデルを準備</button><button class="vm-dual-retry" type="button">字幕を再取得</button></div>
+  <div class="vm-dual-network-detail" role="status"></div>
   <div class="vm-dual-translation-status" role="status"></div>
   <div class="vm-dual-status" role="status"></div>
 </div>
@@ -608,7 +658,7 @@
     root.querySelector('.vm-dual-prepare').addEventListener('click',prepareModels);
     root.querySelector('.vm-dual-retry').addEventListener('click',()=>refresh(true));
     root.style.setProperty('--vm-font',state.font+'px');updatePosition();
-    status(state.status);updateTranslationStatus();enable(state.enabled);
+    status(state.status);updateNetworkUI();updateTranslationStatus();enable(state.enabled);
   }
 
   async function refresh(force=false) {
@@ -617,6 +667,7 @@
     if(!force&&pageKey===state.page)return;
     state.page=pageKey;state.generation++;
     releaseNative();
+    resetNetwork();
     const generation=state.generation;
     state.source=null;state.english=null;state.japanese=null;
     state.translateEpoch++;state.cache.clear();state.pending.clear();state.painted='';
@@ -634,7 +685,12 @@
     }
     const element=document.querySelector('.bpx-player-video-wrap video, #bilibili-player video, video');
     if(element)mount(element);
-    if(state.source?.native)followNativeCaption();
+    if(state.page===video.bvid+'/'+video.page) {
+      const native=nativeCaption();
+      if(native&&!state.source?.native) {
+        switchToNative(native); // Also detect Bilibili subtitles enabled after initial load.
+      } else if(state.source?.native)followNativeCaption();
+    }
     if(state.source&&state.root?.isConnected)render();
     if(state.page!==video.bvid+'/'+video.page&&!state.loading) {
       state.loading=true;
