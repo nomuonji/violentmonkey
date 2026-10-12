@@ -41,7 +41,7 @@
     source: null, english: null, japanese: null,
     cache: new Map(), pending: new Set(), translators: new Map(), probes: new Set(),
     pairs: new Map(), painted: '', translateEpoch: 0,
-    wbiKey: null, nativeHolder: null, nativeOpacity: '', nativeText: '',
+    wbiKey: null, nativeHolder: null, nativeOpacity: '', nativeText: '', nativeMissingAt: 0,
     network: {total:0, api:0, subtitles:0, failed:0}, sourceLabel: '確認中', requesting: false,
   };
 
@@ -257,7 +257,7 @@
   }
   function releaseNative() {
     if(state.nativeHolder?.isConnected)state.nativeHolder.style.opacity=state.nativeOpacity;
-    state.nativeHolder=null;state.nativeText='';
+    state.nativeHolder=null;state.nativeText='';state.nativeMissingAt=0;
   }
   function nativeCaption() {
     const element=document.querySelector('.bpx-player-subtitle-panel-text');
@@ -273,10 +273,22 @@
     if(!state.source?.native||!state.video)return;
     const found=nativeCaption();
     if(!found) {
-      releaseNative(); // Restore the site's own subtitles when unavailable or switched off.
+      // Empty gaps between ordinary caption lines should not trigger a source switch.
+      if(!state.nativeMissingAt)state.nativeMissingAt=Date.now();
       state.caption?.replaceChildren();state.painted='';
+      if(Date.now()-state.nativeMissingAt<3000)return;
+      releaseNative(); // Restore Bilibili's own subtitles if turned off.
+      state.source=null;state.english=null;state.japanese=null;
+      const cached=cachedTracks(state.page);
+      if(cached)setTracks(cached,'ローカルキャッシュ（追加取得なし）');
+      else {
+        setSourceLabel('標準字幕OFF（自動通信なし）');
+        status('標準字幕をONにするか「字幕を取得」を押してください。');
+        updateTranslationStatus();updateFetchButtons();
+      }
       return;
     }
+    state.nativeMissingAt=0;
     if(state.nativeHolder!==found.holder) {
       releaseNative();state.nativeHolder=found.holder;state.nativeOpacity=found.holder.style.opacity;
     }
