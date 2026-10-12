@@ -2,7 +2,7 @@
 // @name         Bilibili Dual Subtitles (EN + JA)
 // @namespace    https://github.com/nomuonji/violentmonkey
 // @version      0.4.0
-// @description  プレイヤー字幕優先・必要最小限の取得・キャッシュ・取得制限時の停止に対応した日英字幕。
+// @description  日英字幕＋追加通信の件数表示・後から有効にしたBilibili字幕の再利用に対応。
 // @author       nomuonji
 // @match        https://www.bilibili.com/video/*
 // @match        https://bilibili.com/video/*
