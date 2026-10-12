@@ -37,19 +37,23 @@ Bilibili の広告・大型バナー・コメント等を整理しつつ、動�
 
 ### Bilibili Dual Subtitles (English + Japanese)
 
-Bilibili に既存字幕がある動画で、日本語のみ・英語のみ・日英併記を切り替えて表示します。既存の `bilibili-minimal.user.js` と併用できます。
+Bilibiliの字幕を日本語・英語で表示するViolentmonkeyスクリプト（v0.3.0）。既存の `bilibili-minimal.user.js` と併用できます。
 
 - Source: [`scripts/bilibili-dual-subtitles.user.js`](./scripts/bilibili-dual-subtitles.user.js)
 - Install / update: https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/bilibili-dual-subtitles.user.js
-- 対象: `www.bilibili.com/video/BV...` の通常動画（分P対応）。番組・ライブは対象外。
-- **設定場所**: 動画プレイヤーの右上にある **「字幕設定 ⚙」**、または Violentmonkey アイコン → このスクリプト → **「Bilibili 字幕設定を開く」**。
-- **表示言語**: 「英語＋日本語」「日本語のみ」「英語のみ」の3種類。
-- **位置・サイズ**: 「上下位置」「左右位置」のスライダーおよび文字サイズ。変更は保存され、次の動画でも維持されます。
-- **翻訳中のままの場合**: 設定内の **「翻訳モデルを準備」** をクリック。Chrome内蔵Translator APIのモデルがないときは初回ダウンロードが発生します。処理状況・エラー理由は設定内の「翻訳状態」に表示します。翻訳が使えない場合は「翻訳中…」と表示し続けません。
-- 字幕取得: `bvid` / `cid` に紐づくWBI署名付きBilibiliプレイヤーAPIを利用。未署名の旧APIは利用しません。
-- Chrome内蔵翻訳: デスクトップChrome 138以降の [Translator API](https://developer.chrome.com/docs/ai/translator-api) を利用。外部翻訳サービスやAPIキーは不要。初回言語モデルの取得にはブラウザ・端末の対応とユーザー操作が必要な場合があります。
-- 翻訳できない場合、字幕がない場合、地域・ログイン制限のある動画では字幕を生成できません。実際のBilibili動画でのE2E検証は未実施です。
-- [Violentmonkeyの実行コンテキスト](https://violentmonkey.github.io/posts/inject-into-context/) の仕様に基づいてページ側で翻訳APIへアクセスします。個人情報・認証情報はソースに含めません。
+- 対象: `www.bilibili.com/video/BV...` の通常動画（分P対応）。ライブ・番組は対象外。
+- **設定**: 動画右上の「字幕設定 ⚙」または Violentmonkeyメニュー「Bilibili 字幕設定を開く」。
+- **表示**: 「英語＋日本語」「日本語のみ」「英語のみ」を切り替え。上下・左右位置と文字サイズは保存されます。
+- **初回翻訳**: Chrome内蔵 [Translator API](https://developer.chrome.com/docs/ai/translator-api) に対応したデスクトップChromeで、設定内の「翻訳モデルを準備」を押してください。未対応のブラウザでは追加の訳文を生成できません。
+- **字幕取得の優先順位**:
+  1. Violentmonkey内に保存した動画別の字幕キャッシュ（6時間・最大5動画）。追加通信なし。
+  2. Bilibiliプレイヤーに**現在表示されている字幕**を読み取る。追加API通信なし。必要ならプレイヤーの字幕をONにしてください。この場合、画面上の元字幕は重複防止のため一時的に隠し、スクリプトをOFFにすると復元します。
+  3. 動画ページ内に埋め込まれた字幕URLがあれば利用し、字幕本文だけ取得。
+  4. 上記が利用できない場合、動画ページの既存の `aid`・`cid` を優先的に使い、WBI署名付きプレイヤーAPIで必要な字幕トラックだけを取得。取得トラックは最大3本。
+- **アクセス制限時**: HTTP 412/429、APIコード -352/-412を受けたら、追加取得を24時間停止（手動の再取得も対象）。キャッシュや表示済みプレイヤー字幕は利用可能です。APIへの自動リトライは行いません。
+- ローカルキャッシュには字幕テキストと有効期限だけを保存し、Cookie・アクセストークン・署名・秘密情報は保存しません。
+- 既存字幕がない動画の文字起こしには非対応です。サイト側の利用規約・アクセス制限は引き続き適用され、APIの呼び出し削減によって利用が許可されたことにはなりません。
+- 検証: 構文解析、キャッシュ再利用、表示済み字幕の再利用、選択言語の取得本数、HTTP 412での停止、ページ情報再利用、WBIフォールバックをモック環境で確認。実動画でのE2E検証は未実施です。
 
 ## Installation
 
