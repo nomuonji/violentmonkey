@@ -282,7 +282,7 @@
         event.clientX >= rect.left - 1 && event.clientX <= rect.right + 1 &&
         event.clientY >= rect.top - 1 && event.clientY <= rect.bottom + 1
       );
-      if (hit) return { text: match[0], hint: 'en', rect: hit };
+      if (hit) return { text: match[0], hint: languageHint(tweetText) || 'en', rect: hit };
     }
     return null;
   }
@@ -322,7 +322,7 @@
     popup.setAttribute('aria-label', 'Xの選択テキスト翻訳');
     const head = element('div', 'vmxt-pop-head');
     const title = element('span', 'vmxt-pop-word', info.text);
-    const isWord = /^[a-z]+(?:[-'][a-z]+)*$/i.test(info.text);
+    const isWord = /^[\p{Script=Latin}]+(?:['’\-][\p{Script=Latin}]+)*$/u.test(info.text);
     const sound = element('button', 'vmxt-pop-speak', '🔊');
     sound.type = 'button';
     sound.title = '英語の発音を聞く';
@@ -355,7 +355,8 @@
       translateButton.textContent = '翻訳中…';
       definition.textContent = '翻訳の準備中…';
       try {
-        const value = await translate(info.text, isWord ? 'en' : info.hint, msg => {
+        const wordHint = isWord && (info.hint === 'ja' || !info.hint) ? 'en' : info.hint;
+        const value = await translate(info.text, wordHint, msg => {
           if (selectionPopover === popup && selectionSerial === serial) definition.textContent = msg;
         });
         if (selectionPopover !== popup || selectionSerial !== serial) return;
