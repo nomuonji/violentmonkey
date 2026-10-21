@@ -7,6 +7,18 @@
 
 ## Scripts
 
+### X Inline Translator（Chrome組み込みAI）
+
+Xのタイムライン上で投稿を日本語へ翻訳し、選択した英単語・フレーズの日本語訳をポップアップ表示します。既存の `X Lightweight` と併用できます。
+
+- Source: [`scripts/x-inline-translator.user.js`](./scripts/x-inline-translator.user.js)
+- Install / update: https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/x-inline-translator.user.js
+- **対応**: デスクトップ版 Chrome 138以降で、組み込み `Translator` APIが利用できる環境。モデルや言語ペアはChrome側の対応状況によります。スマートフォンには非対応です。
+- **操作**: 各投稿下の「日本語訳」をクリックすると、原文を残して訳文を表示します。英単語をダブルクリックすると自動翻訳、単語・フレーズをドラッグ選択すると「訳す」ボタンが表示されます。英単語の発音読み上げにも対応します。
+- **通信と費用**: 非公式Google翻訳エンドポイントや外部翻訳APIは呼びません。ブラウザ組み込みモデルで翻訳します。初回はChromeによるモデルダウンロードが必要な場合があります。APIキー・課金・外部サーバーは不要です。
+- **辞書との違い**: 選択語の訳語は機械翻訳であり、辞書的な語義・品詞・発音記号の網羅ではありません。読み上げにはブラウザの音声合成を使用します。
+- **非対応時**: オンライン翻訳への自動フォールバックは行わず、利用不可の理由を表示します。端末・ブラウザ条件による制約があり、Xでの実機E2E検証は未実施です。
+
 ### X Lightweight
 
 X の不要 UI や画面効果を減らし、動画をクリックしただけでポスト詳細 URL に遷移する挙動を抑止します。
@@ -91,6 +103,7 @@ violentmonkey/
 │   ├── bilibili-dual-subtitles.user.js
 │   ├── bilibili-minimal.user.js
 │   ├── chatgpt-lightweight.user.js
+│   ├── x-inline-translator.user.js
 │   ├── x-lightweight.user.js
 │   └── youtube-lightweight.user.js
 ├── README.md
