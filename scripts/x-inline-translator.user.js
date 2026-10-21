@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Inline Translator (Chrome Built-in AI)
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      0.2.0
+// @version      0.2.1
 // @description  X投稿をローカル翻訳。英単語は1クリックで意味表示、ドラッグ選択はフレーズ翻訳。
 // @author       nomuonji
 // @match        https://x.com/*
@@ -37,7 +37,9 @@
     '.vmxt-pop-definition{margin-top:8px;white-space:pre-wrap;overflow-wrap:anywhere;}',
     '.vmxt-pop-foot{margin-top:7px;font-size:11px;color:#aab8c6;}',
     '.vmxt-pop-close,.vmxt-pop-speak{background:transparent;border:0;color:#a9ddff;padding:3px 6px;cursor:pointer;font-size:14px;}',
-    '.vmxt-pop-translate{margin-top:7px;}'
+    '.vmxt-pop-translate{margin-top:7px;}',
+    '.vmxt-pop-tools{display:flex;flex-wrap:wrap;align-items:center;gap:8px;}',
+    '.vmxt-pop-search{display:inline-flex;align-items:center;text-decoration:none;margin-top:7px;white-space:nowrap;}'
   ].join('\n');
   (document.head || document.documentElement).append(style);
 
@@ -336,10 +338,20 @@
     head.append(title, sound, close);
     const translateButton = element('button', 'vmxt-button vmxt-pop-translate', isWord ? '単語の意味を表示' : '選択部分を訳す');
     translateButton.type = 'button';
+    // A real link preserves the browser's direct new-tab gesture and avoids popup blockers.
+    // Search queries are sent to Google only when the user explicitly taps this link.
+    const searchLink = element('a', 'vmxt-button vmxt-pop-search', 'Google検索 ↗');
+    searchLink.href = 'https://www.google.com/search?q=' + encodeURIComponent(info.text);
+    searchLink.target = '_blank';
+    searchLink.rel = 'noopener noreferrer';
+    searchLink.title = 'この単語をGoogleで検索（新しいタブ）';
+    searchLink.hidden = !isWord;
+    const tools = element('div', 'vmxt-pop-tools');
+    tools.append(translateButton, searchLink);
     const definition = element('div', 'vmxt-pop-definition');
     const foot = element('div', 'vmxt-pop-foot', 'ローカルAIによる訳語です。辞書の全語義・品詞の網羅ではありません。');
     foot.hidden = true;
-    popup.append(head, translateButton, definition, foot);
+    popup.append(head, tools, definition, foot);
     popup.addEventListener('pointerdown', e => e.stopPropagation());
     popup.addEventListener('click', e => e.stopPropagation());
     document.body.append(popup);
