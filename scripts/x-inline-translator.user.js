@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         X Inline Translator (Chrome Built-in AI)
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      0.1.0
-// @description  X上で投稿を日本語に翻訳し、選択した英単語・フレーズの訳と発音を表示。Chrome組み込みAIを使用。
+// @version      0.2.0
+// @description  X投稿をローカル翻訳。英単語は1クリックで意味表示、ドラッグ選択はフレーズ翻訳。
 // @author       nomuonji
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -237,6 +237,56 @@
     selectionSerial++;
   }
 
+
+  // Resolve a clicked English word without wrapping or replacing X's React-managed text nodes.
+  // Links, hashtags/mentions rendered as links, selection, and modified clicks remain native.
+  function clickedEnglishWord(event) {
+    if (event.button !== 0 || event.detail !== 1 ||
+        event.altKey || event.ctrlKey || event.metaKey || event.shiftKey ||
+        !(event.target instanceof Element)) return null;
+    const tweetText = event.target.closest('[data-testid="tweetText"]');
+    if (!tweetText || !tweetText.closest('article[data-testid="tweet"]')) return null;
+
+    const interactive = event.target.closest(
+      'a,button,input,textarea,select,[role="link"],[role="button"],[contenteditable="true"]'
+    );
+    if (interactive && tweetText.contains(interactive)) return null;
+    const selection = globalThis.getSelection();
+    if (selection && !selection.isCollapsed) return null;
+
+    let node, offset;
+    if (document.caretPositionFromPoint) {
+      const position = document.caretPositionFromPoint(event.clientX, event.clientY);
+      node = position?.offsetNode;
+      offset = position?.offset;
+    } else if (document.caretRangeFromPoint) {
+      const range = document.caretRangeFromPoint(event.clientX, event.clientY);
+      node = range?.startContainer;
+      offset = range?.startOffset;
+    }
+    if (!node || node.nodeType !== Node.TEXT_NODE || !tweetText.contains(node) ||
+        !Number.isInteger(offset)) return null;
+
+    // Caret offsets can sit on either boundary; actual glyph rects decide the hit.
+    const content = node.textContent || '';
+    const wordPattern = /[\p{Script=Latin}]+(?:['’\-][\p{Script=Latin}]+)*/gu;
+    for (const match of content.matchAll(wordPattern)) {
+      const start = match.index;
+      const end = start + match[0].length;
+      if (match[0].length > 48 || offset < start || offset > end) continue;
+      const range = document.createRange();
+      range.setStart(node, start);
+      range.setEnd(node, end);
+      const hit = Array.from(range.getClientRects()).find(rect =>
+        rect.width > 0 && rect.height > 0 &&
+        event.clientX >= rect.left - 1 && event.clientX <= rect.right + 1 &&
+        event.clientY >= rect.top - 1 && event.clientY <= rect.bottom + 1
+      );
+      if (hit) return { text: match[0], hint: 'en', rect: hit };
+    }
+    return null;
+  }
+
   function selectedTweetText() {
     const selection = globalThis.getSelection();
     if (!selection || selection.isCollapsed || selection.rangeCount < 1) return null;
@@ -305,7 +355,7 @@
       translateButton.textContent = '翻訳中…';
       definition.textContent = '翻訳の準備中…';
       try {
-        const value = await translate(info.text, info.hint, msg => {
+        const value = await translate(info.text, isWord ? 'en' : info.hint, msg => {
           if (selectionPopover === popup && selectionSerial === serial) definition.textContent = msg;
         });
         if (selectionPopover !== popup || selectionSerial !== serial) return;
@@ -323,6 +373,15 @@
     translateButton.addEventListener('click', runTranslate);
     if (automatic && isWord) runTranslate();
   }
+
+  document.addEventListener('click', event => {
+    const info = clickedEnglishWord(event);
+    if (!info) return;
+    // X normally opens the post when its text is clicked; intercept only English words.
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    showSelectionPopup(info, true);
+  }, true);
 
   document.addEventListener('mouseup', event => {
     if (event.button !== 0) return;
