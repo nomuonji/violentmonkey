@@ -204,9 +204,12 @@
       const key = getWordKey(word);
       const previous = processed.get(word);
       if (previous?.key === key) return;
+      // Do not mark off-screen words as attempted; they can be reconsidered after
+      // a later subtitle/DOM update brings them into view.
+      if (!visibleOnScreen(word)) return;
 
       processed.set(word, { key, status: 'queued' });
-      if (visibleOnScreen(word)) queue.push({ word, key });
+      queue.push({ word, key });
     });
     void processQueue();
   }
