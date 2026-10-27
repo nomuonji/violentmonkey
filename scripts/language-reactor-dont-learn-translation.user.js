@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Language Reactor Don't Learn Translations
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      1.0.2
+// @version      1.1.0
 // @description  Keep dictionary meanings visible for purple (Don't Learn) Language Reactor subtitle words.
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -22,61 +22,127 @@
   const WORD_SELECTOR = '#lln-subs .lln-word, .lln-subs-text .lln-word';
   const TARGET_PURPLE = [184, 148, 197];
   const COLOR_TOLERANCE = 40;
-  const processed = new WeakMap();
+
+  // State is keyed by a stable token description, not a DOM node.
+  // Language Reactor can replace the subtitle subtree after a hover.
+  const processed = new Map();
+  const dictionaryCache = new Map();
   const queue = [];
+  const queued = new Set();
   let processing = false;
+  let scanScheduled = false;
+
+  const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
   function addStyles() {
     if (document.getElementById(STYLE_ID)) return;
     const style = document.createElement('style');
     style.id = STYLE_ID;
-    style.textContent = `
-      .lln-word[${MARKER}="true"] > .tt[${READY_MARKER}="true"],
-      .lln-word[${MARKER}="true"] > .tt[${READY_MARKER}="true"].lln-tt-hidden {
-        opacity: 1 !important;
-        visibility: visible !important;
-        display: block !important;
-        pointer-events: none !important;
-        z-index: 2147483647 !important;
-      }
-    `;
+    style.textContent =
+      '.lln-word[' + MARKER + '="true"] > .tt[' + READY_MARKER + '="true"],' +
+      '.lln-word[' + MARKER + '="true"] > .tt[' + READY_MARKER + '="true"].lln-tt-hidden {' +
+      'opacity:1!important;visibility:visible!important;display:block!important;' +
+      'pointer-events:none!important;z-index:2147483647!important;}';
     (document.head || document.documentElement).appendChild(style);
   }
 
   function isPurple(word) {
-    const match = getComputedStyle(word).color.match(/[\d.]+/g);
-    if (!match || match.length < 3) return false;
-    const rgb = match.slice(0, 3).map(Number);
+    const values = getComputedStyle(word).color.match(/[\d.]+/g);
+    if (!values || values.length < 3) return false;
+    const rgb = values.slice(0, 3).map(Number);
     const distance = Math.sqrt(rgb.reduce(
       (sum, value, i) => sum + (value - TARGET_PURPLE[i]) ** 2, 0
     ));
     return distance <= COLOR_TOLERANCE;
   }
 
+  function readWordText(word) {
+    return [...word.childNodes]
+      .filter(node => node.nodeType === Node.TEXT_NODE)
+      .map(node => node.textContent)
+      .join('')
+      .trim();
+  }
+
   function getTooltip(word) {
     return word.querySelector(':scope > .tt') || word.querySelector('.tt');
   }
 
-  function dictionaryIsReady(word) {
-    const tooltip = getTooltip(word);
-    return Boolean(tooltip?.querySelector('.lln-hover-dict-entries'));
+  function meaningKey(item) {
+    const wordKey = typeof item.wordKey === 'string'
+      ? item.wordKey
+      : (item.getAttribute('data-word-key') || '');
+    const label = typeof item.label === 'string'
+      ? item.label
+      : readWordText(item);
+    return wordKey + '|' + label;
   }
 
-  function keepDictionaryVisible(word) {
-    const tooltip = getTooltip(word);
-    if (!tooltip || !tooltip.querySelector('.lln-hover-dict-entries')) return false;
+  function hasDictionary(word) {
+    return Boolean(getTooltip(word)?.querySelector('.lln-hover-dict-entries'));
+  }
+
+  function applyDictionaryMarkup(word, markup) {
+    let tooltip = getTooltip(word);
+    if (!tooltip) {
+      tooltip = document.createElement('span');
+      tooltip.className = 'tt lln-tt-hidden';
+      word.prepend(tooltip);
+    }
+    if (markup && !tooltip.querySelector('.lln-hover-dict-entries')) {
+      tooltip.innerHTML = markup;
+    }
+    if (!tooltip.querySelector('.lln-hover-dict-entries')) return false;
     word.setAttribute(MARKER, 'true');
     tooltip.setAttribute(READY_MARKER, 'true');
     return true;
   }
 
-  function getWordKey(word) {
-    const text = [...word.childNodes]
-      .filter(node => node.nodeType === Node.TEXT_NODE)
-      .map(node => node.textContent)
-      .join('')
-      .trim();
-    return `${word.getAttribute('data-word-key') || ''}|${text}`;
+  function cacheVisibleDictionary(word) {
+    const tooltip = getTooltip(word);
+    if (!tooltip?.querySelector('.lln-hover-dict-entries')) return false;
+    dictionaryCache.set(meaningKey(word), tooltip.innerHTML);
+    return applyDictionaryMarkup(word, tooltip.innerHTML);
+  }
+
+  function sentenceSignature(container) {
+    if (!container) return '';
+    return [...container.querySelectorAll('.lln-word')]
+      .filter(word => !word.classList.contains('lln-group-part'))
+      .map(word => [
+        word.getAttribute('data-token-index') || '',
+        word.getAttribute('data-word-key') || '',
+        readWordText(word)
+      ].join('~'))
+      .join('|');
+  }
+
+  function describe(word) {
+    const container = word.closest('.lln-subs-text') || word.closest('#lln-subs');
+    const descriptor = {
+      tokenIndex: word.getAttribute('data-token-index') || '',
+      wordKey: word.getAttribute('data-word-key') || '',
+      label: readWordText(word),
+      sentence: sentenceSignature(container)
+    };
+    descriptor.id = [
+      descriptor.sentence, descriptor.tokenIndex, descriptor.wordKey, descriptor.label
+    ].join('§');
+    descriptor.meaning = meaningKey(descriptor);
+    return descriptor;
+  }
+
+  function findCurrentWord(descriptor) {
+    for (const word of document.querySelectorAll(WORD_SELECTOR)) {
+      if (!word.isConnected || word.classList.contains('lln-group-part')) continue;
+      if ((word.getAttribute('data-token-index') || '') !== descriptor.tokenIndex) continue;
+      if ((word.getAttribute('data-word-key') || '') !== descriptor.wordKey) continue;
+      if (readWordText(word) !== descriptor.label || !isPurple(word)) continue;
+      const container = word.closest('.lln-subs-text') || word.closest('#lln-subs');
+      if (sentenceSignature(container) !== descriptor.sentence) continue;
+      return word;
+    }
+    return null;
   }
 
   function visibleOnScreen(word) {
@@ -86,35 +152,9 @@
       rect.top < window.innerHeight && rect.left < window.innerWidth;
   }
 
-  function waitForDictionary(word, timeoutMs = 1800) {
-    if (dictionaryIsReady(word)) return Promise.resolve(true);
-    return new Promise(resolve => {
-      let finished = false;
-      let observer;
-      const timeout = setTimeout(() => finish(false), timeoutMs);
-      function finish(success) {
-        if (finished) return;
-        finished = true;
-        clearTimeout(timeout);
-        observer?.disconnect();
-        resolve(success);
-      }
-      observer = new MutationObserver(() => {
-        if (dictionaryIsReady(word)) finish(true);
-      });
-      observer.observe(word, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ['class']
-      });
-      if (dictionaryIsReady(word)) finish(true);
-    });
-  }
-
   function dispatchHover(word) {
     const rect = word.getBoundingClientRect();
-    const eventOptions = {
+    const options = {
       bubbles: true,
       cancelable: true,
       view: window,
@@ -122,29 +162,24 @@
       clientY: rect.top + rect.height / 2,
       relatedTarget: document.body
     };
-
-    // Language Reactor may react to pointer movement/entry rather than just
-    // mouseover. Dispatch the relevant sequence against the word itself.
     try {
       word.dispatchEvent(new PointerEvent('pointerover', {
-        ...eventOptions, pointerType: 'mouse', isPrimary: true
+        ...options, pointerType: 'mouse', isPrimary: true
       }));
       word.dispatchEvent(new PointerEvent('pointerenter', {
-        ...eventOptions, bubbles: false, pointerType: 'mouse', isPrimary: true
+        ...options, bubbles: false, pointerType: 'mouse', isPrimary: true
       }));
       word.dispatchEvent(new PointerEvent('pointermove', {
-        ...eventOptions, pointerType: 'mouse', isPrimary: true
+        ...options, pointerType: 'mouse', isPrimary: true
       }));
-    } catch { /* PointerEvent may be unavailable in older browsers. */ }
-
-    word.dispatchEvent(new MouseEvent('mouseover', eventOptions));
-    word.dispatchEvent(new MouseEvent('mouseenter', {
-      ...eventOptions, bubbles: false
-    }));
-    word.dispatchEvent(new MouseEvent('mousemove', eventOptions));
+    } catch { /* Older browser fallback below. */ }
+    word.dispatchEvent(new MouseEvent('mouseover', options));
+    word.dispatchEvent(new MouseEvent('mouseenter', { ...options, bubbles: false }));
+    word.dispatchEvent(new MouseEvent('mousemove', options));
   }
 
   function dispatchLeave(word) {
+    if (!word) return;
     const options = {
       bubbles: true,
       cancelable: true,
@@ -158,9 +193,43 @@
       word.dispatchEvent(new PointerEvent('pointerleave', {
         ...options, bubbles: false, pointerType: 'mouse', isPrimary: true
       }));
-    } catch { /* PointerEvent may be unavailable in older browsers. */ }
+    } catch { /* Older browser fallback below. */ }
     word.dispatchEvent(new MouseEvent('mouseout', options));
     word.dispatchEvent(new MouseEvent('mouseleave', { ...options, bubbles: false }));
+  }
+
+  function waitForDictionary(descriptor, timeoutMs = 2400) {
+    const initial = findCurrentWord(descriptor);
+    if (initial && hasDictionary(initial)) {
+      return Promise.resolve({ word: initial, markup: getTooltip(initial).innerHTML });
+    }
+
+    return new Promise(resolve => {
+      let finished = false;
+      const observer = new MutationObserver(check);
+      const timeout = setTimeout(() => finish(null), timeoutMs);
+
+      function finish(result) {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timeout);
+        observer.disconnect();
+        resolve(result);
+      }
+      function check() {
+        const word = findCurrentWord(descriptor);
+        if (word && hasDictionary(word)) {
+          finish({ word, markup: getTooltip(word).innerHTML });
+        }
+      }
+
+      // Observe the document, not the original word: hover can replace that node.
+      observer.observe(document.documentElement, {
+        childList: true, subtree: true, characterData: true,
+        attributes: true, attributeFilter: ['class', 'style', 'data-word-key']
+      });
+      check();
+    });
   }
 
   async function processQueue() {
@@ -168,46 +237,49 @@
     processing = true;
     try {
       while (queue.length) {
-        const { word, key } = queue.shift();
-        const state = processed.get(word);
-        if (!word.isConnected || !isPurple(word) || getWordKey(word) !== key) continue;
-        if (keepDictionaryVisible(word)) {
-          processed.set(word, { key, status: 'ready' });
+        const descriptor = queue.shift();
+        queued.delete(descriptor.id);
+        const prior = processed.get(descriptor.id) || { attempts: 0 };
+        const word = findCurrentWord(descriptor);
+        if (!word) {
+          processed.set(descriptor.id, {
+            status: 'attempted', attempts: prior.attempts || 0, lastAttempt: Date.now()
+          });
           continue;
         }
 
-        const previous = processed.get(word);
-        const attempts = previous?.key === key ? (previous.attempts || 0) + 1 : 1;
-        processed.set(word, { key, status: 'queued', attempts, lastAttempt: Date.now() });
+        const cached = dictionaryCache.get(descriptor.meaning);
+        if (cached && applyDictionaryMarkup(word, cached)) {
+          processed.set(descriptor.id, { status: 'ready', attempts: prior.attempts || 0 });
+          continue;
+        }
+        if (cacheVisibleDictionary(word)) {
+          processed.set(descriptor.id, { status: 'ready', attempts: prior.attempts || 0 });
+          continue;
+        }
 
+        const attempts = (prior.attempts || 0) + 1;
+        processed.set(descriptor.id, { status: 'queued', attempts, lastAttempt: Date.now() });
         dispatchHover(word);
-        const loaded = await waitForDictionary(word);
+        const result = await waitForDictionary(descriptor);
 
-        if (loaded && dictionaryIsReady(word)) {
-          // Release Language Reactor's current hover state so the next purple
-          // word can open its own dictionary. Some LR versions clear the tooltip
-          // on pointerleave, so keep a copy and restore it if that happens.
-          const loadedTooltip = getTooltip(word);
-          const savedMarkup = loadedTooltip?.innerHTML || '';
-          dispatchLeave(word);
-          const currentTooltip = getTooltip(word);
-          if (savedMarkup && currentTooltip &&
-              !currentTooltip.querySelector('.lln-hover-dict-entries')) {
-            currentTooltip.innerHTML = savedMarkup;
-          }
-          if (keepDictionaryVisible(word)) {
-            processed.set(word, { key, status: 'ready', attempts });
-          } else {
-            processed.set(word, { key, status: 'attempted', attempts, lastAttempt: Date.now() });
-            if (attempts < 3) setTimeout(scheduleScan, 2200);
-          }
+        if (result?.markup) {
+          dictionaryCache.set(descriptor.meaning, result.markup);
+          // Release the previous hover before opening the next word.
+          dispatchLeave(findCurrentWord(descriptor) || result.word);
+          await delay(80);
+
+          // Resolve the possibly replaced node again; never reuse stale references.
+          const current = findCurrentWord(descriptor) ||
+            (result.word.isConnected ? result.word : null);
+          if (current) applyDictionaryMarkup(current, result.markup);
+          processed.set(descriptor.id, { status: 'ready', attempts });
         } else {
-          dispatchLeave(word);
-          processed.set(word, { key, status: 'attempted', attempts, lastAttempt: Date.now() });
+          dispatchLeave(findCurrentWord(descriptor) || word);
+          processed.set(descriptor.id, { status: 'attempted', attempts, lastAttempt: Date.now() });
           if (attempts < 3) setTimeout(scheduleScan, 2200);
         }
-        // Avoid rapid bursts if several Don't Learn words appear together.
-        await new Promise(resolve => setTimeout(resolve, 120));
+        await delay(140);
       }
     } finally {
       processing = false;
@@ -217,47 +289,45 @@
 
   function scan() {
     addStyles();
-    document.querySelectorAll(WORD_SELECTOR).forEach(word => {
-      // Contractions are split into visual fragments; process the main token once.
-      if (word.classList.contains('lln-group-part')) return;
+    for (const word of document.querySelectorAll(WORD_SELECTOR)) {
+      if (word.classList.contains('lln-group-part')) continue;
 
-      const tooltip = getTooltip(word);
       if (!isPurple(word)) {
         word.removeAttribute(MARKER);
-        tooltip?.removeAttribute(READY_MARKER);
-        processed.delete(word);
-        return;
+        getTooltip(word)?.removeAttribute(READY_MARKER);
+        continue;
       }
 
+      const descriptor = describe(word);
       word.setAttribute(MARKER, 'true');
-      if (keepDictionaryVisible(word)) {
-        const key = getWordKey(word);
-        processed.set(word, { key, status: 'ready' });
-        return;
-      }
 
-      const key = getWordKey(word);
-      const previous = processed.get(word);
-      if (previous?.key === key) {
-        if (previous.status === 'ready' || previous.status === 'queued') return;
-        if ((previous.attempts || 0) >= 3) return;
-        if (Date.now() - (previous.lastAttempt || 0) < 2000) return;
+      const cached = dictionaryCache.get(descriptor.meaning);
+      if (cached) {
+        applyDictionaryMarkup(word, cached);
+        processed.set(descriptor.id, { status: 'ready', attempts: 0 });
+        continue;
       }
-      // Do not mark off-screen words as attempted; they can be reconsidered after
-      // a later subtitle/DOM update brings them into view.
-      if (!visibleOnScreen(word)) return;
+      if (cacheVisibleDictionary(word)) {
+        processed.set(descriptor.id, { status: 'ready', attempts: 0 });
+        continue;
+      }
+      if (!visibleOnScreen(word)) continue;
 
-      processed.set(word, {
-        key,
-        status: 'queued',
-        attempts: previous?.key === key ? (previous.attempts || 0) : 0
+      const state = processed.get(descriptor.id);
+      if (state?.status === 'ready' || state?.status === 'queued') continue;
+      if ((state?.attempts || 0) >= 3) continue;
+      if (Date.now() - (state?.lastAttempt || 0) < 2000) continue;
+      if (queued.has(descriptor.id)) continue;
+
+      queued.add(descriptor.id);
+      processed.set(descriptor.id, {
+        status: 'queued', attempts: state?.attempts || 0, lastAttempt: state?.lastAttempt || 0
       });
-      queue.push({ word, key });
-    });
+      queue.push(descriptor);
+    }
     void processQueue();
   }
 
-  let scanScheduled = false;
   function scheduleScan() {
     if (scanScheduled) return;
     scanScheduled = true;
@@ -272,7 +342,7 @@
     childList: true,
     subtree: true,
     attributes: true,
-    attributeFilter: ['style', 'class', 'data-word-key']
+    attributeFilter: ['style', 'class', 'data-word-key', 'data-token-index']
   });
   scan();
 })();
