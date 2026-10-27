@@ -19,6 +19,27 @@ Language Reactorの字幕で、Don't Learn に設定された紫色の単語の�
 - **設定**: スクリプト冒頭の `TARGET_LANG`（訳の言語）、`TARGET_COLOR`（紫色）、`MAX_MEANINGS` で調整できます。
 - **注意**: 対象は動画上の字幕（`#lln-subs`）で、右側のサイドバー字幕は対象外です。Language Reactor側のAPI・色・DOM構造が変わると調整が必要です。YouTubeでは実ブラウザで表示を確認済み、Netflixは未確認です。
 
+### Language Reactor Word Stock
+
+Language Reactorの字幕で、覚えたい英単語を **Alt+クリック**（MacはOption+クリック）すると、Googleスプレッドシートにストックします。
+
+- Source: [`scripts/language-reactor-word-stock.user.js`](./scripts/language-reactor-word-stock.user.js)
+- Install / update: https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/language-reactor-word-stock.user.js
+- 受け口: [`apps-script/word-stock/Code.gs`](./apps-script/word-stock/Code.gs)
+- **保存される列**: 単語 / 意味（LRの辞書から最大3つ）/ 例文（その字幕の文）/ 動画タイトル / リンク（YouTubeはその場面の2秒前から再生）/ 追加日時 / 回数 / 最終保存 / メモ（自由記入）。
+- **重複**: 同じ単語は新しい行を作らず「回数」と「最終保存」を更新し、別の例文なら最大3つまで追記します。
+- **対象**: 動画上の字幕と右サイドバーの字幕の両方。Alt+クリックはLR側には渡さないので、通常クリックの動作（一時停止や辞書）はそのままです。
+
+#### 初回セットアップ
+
+1. 新しいGoogleスプレッドシートを作り、`拡張機能 > Apps Script` を開く。
+2. `Code.gs` の中身を [`apps-script/word-stock/Code.gs`](./apps-script/word-stock/Code.gs) で置き換えて保存。
+3. `デプロイ > 新しいデプロイ` → 種類「ウェブアプリ」、実行するユーザー「自分」、アクセスできるユーザー「全員」でデプロイし、表示された権限を許可。
+4. 表示されたウェブアプリURL（`…/exec`）をコピー。
+5. YouTubeでViolentmonkeyのメニュー → `単語ストック: 保存先URLを設定` に貼り付け（未設定のまま初めてAlt+クリックしたときも聞かれます）。
+
+- **注意**: ウェブアプリURLはViolentmonkeyのスクリプト用ストレージにだけ保存し、このリポジトリには入れません。URLを知っている人はシートに行を追加できてしまうので、URLは共有しないでください。`Code.gs` を変更したときは「デプロイを管理」から同じデプロイの新バージョンを作るとURLが変わりません。Netflixでは未確認です。
+
 ### X Inline Translator（Chrome組み込みAI）
 
 Xのタイムライン上で投稿を日本語へ翻訳し、選択した英単語・フレーズの日本語訳をポップアップ表示します。既存の `X Lightweight` と併用できます。
