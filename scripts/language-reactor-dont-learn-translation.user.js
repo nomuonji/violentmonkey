@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Language Reactor Don't Learn Translations
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      1.0.0
+// @version      1.0.1
 // @description  Keep dictionary meanings visible for purple (Don't Learn) Language Reactor subtitle words.
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -122,14 +122,26 @@
       clientY: rect.top + rect.height / 2,
       relatedTarget: document.body
     };
+
+    // Language Reactor may react to pointer movement/entry rather than just
+    // mouseover. Dispatch the relevant sequence against the word itself.
     try {
       word.dispatchEvent(new PointerEvent('pointerover', {
-        ...eventOptions,
-        pointerType: 'mouse',
-        isPrimary: true
+        ...eventOptions, pointerType: 'mouse', isPrimary: true
+      }));
+      word.dispatchEvent(new PointerEvent('pointerenter', {
+        ...eventOptions, bubbles: false, pointerType: 'mouse', isPrimary: true
+      }));
+      word.dispatchEvent(new PointerEvent('pointermove', {
+        ...eventOptions, pointerType: 'mouse', isPrimary: true
       }));
     } catch { /* PointerEvent may be unavailable in older browsers. */ }
+
     word.dispatchEvent(new MouseEvent('mouseover', eventOptions));
+    word.dispatchEvent(new MouseEvent('mouseenter', {
+      ...eventOptions, bubbles: false
+    }));
+    word.dispatchEvent(new MouseEvent('mousemove', eventOptions));
   }
 
   function dispatchLeave(word) {
@@ -162,14 +174,22 @@
           continue;
         }
 
+        const previous = processed.get(word);
+        const attempts = previous?.key === key ? (previous.attempts || 0) + 1 : 1;
+        processed.set(word, { key, status: 'queued', attempts, lastAttempt: Date.now() });
+
         dispatchHover(word);
         const loaded = await waitForDictionary(word);
-        dispatchLeave(word);
 
+        // Do NOT dispatch mouseleave after a successful lookup: Language Reactor
+        // may clear the populated dictionary on leave. Keep the populated tooltip
+        // in place and let our CSS reveal it. Clean up only failed attempts.
         if (loaded && keepDictionaryVisible(word)) {
-          processed.set(word, { key, status: 'ready' });
+          processed.set(word, { key, status: 'ready', attempts });
         } else {
-          processed.set(word, { key, status: 'attempted' });
+          dispatchLeave(word);
+          processed.set(word, { key, status: 'attempted', attempts, lastAttempt: Date.now() });
+          if (attempts < 3) setTimeout(scheduleScan, 2200);
         }
         // Avoid rapid bursts if several Don't Learn words appear together.
         await new Promise(resolve => setTimeout(resolve, 120));
@@ -203,12 +223,20 @@
 
       const key = getWordKey(word);
       const previous = processed.get(word);
-      if (previous?.key === key) return;
+      if (previous?.key === key) {
+        if (previous.status === 'ready' || previous.status === 'queued') return;
+        if ((previous.attempts || 0) >= 3) return;
+        if (Date.now() - (previous.lastAttempt || 0) < 2000) return;
+      }
       // Do not mark off-screen words as attempted; they can be reconsidered after
       // a later subtitle/DOM update brings them into view.
       if (!visibleOnScreen(word)) return;
 
-      processed.set(word, { key, status: 'queued' });
+      processed.set(word, {
+        key,
+        status: 'queued',
+        attempts: previous?.key === key ? (previous.attempts || 0) : 0
+      });
       queue.push({ word, key });
     });
     void processQueue();
