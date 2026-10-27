@@ -1,60 +1,118 @@
 // ==UserScript==
 // @name         Language Reactor Don't Learn Translations
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      1.1.1
-// @description  Keep dictionary meanings visible for purple (Don't Learn) Language Reactor subtitle words.
+// @version      2.0.0
+// @description  Always show dictionary meanings above purple (Don't Learn) words in Language Reactor subtitles.
 // @author       nomuonji
 // @match        https://www.youtube.com/*
 // @match        https://www.netflix.com/*
 // @run-at       document-idle
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @connect      api-cdn-plus.dioco.io
 // @noframes
 // @updateURL    https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/language-reactor-dont-learn-translation.user.js
 // @downloadURL  https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/language-reactor-dont-learn-translation.user.js
 // ==/UserScript==
 
+/*
+ * How it works
+ * Language Reactor only opens its hover dictionary for real (isTrusted) mouse
+ * events, so simulated hovers never fill the tooltip. Instead, this script calls
+ * the same dictionary endpoint Language Reactor uses for its hover popup and
+ * draws its own always-visible labels above each Don't Learn word.
+ */
 (() => {
   'use strict';
 
-  const STYLE_ID = 'lr-dont-learn-translation-style';
-  const MARKER = 'data-lr-dont-learn-always';
-  const READY_MARKER = 'data-lr-dont-learn-dict-ready';
-  const WORD_SELECTOR = '#lln-subs .lln-word, .lln-subs-text .lln-word';
-  const TARGET_PURPLE = [184, 148, 197];
+  // ---- Settings ----------------------------------------------------------
+  const TARGET_LANG = 'ja';                 // Language of the meanings.
+  const TARGET_COLOR = [184, 148, 197];     // Don't Learn purple.
   const COLOR_TOLERANCE = 40;
+  const MAX_MEANINGS = 3;
+  const DICT_URL = 'https://api-cdn-plus.dioco.io/base_dict_getHoverDict_8';
 
-  // Cache dictionary HTML by word, and processing state by current subtitle+token.
-  const processed = new Map();
-  const dictionaryCache = new Map();
-  const queue = [];
-  const queued = new Set();
-  let processing = false;
+  // ---- Constants ---------------------------------------------------------
+  const SUBS_SELECTOR = '#lln-subs';
+  const WORD_SELECTOR = '.lln-word';
+  const LAYER_CLASS = 'lr-dl-layer';
+  const LABEL_CLASS = 'lr-dl-label';
+  const STYLE_ID = 'lr-dl-style';
+
+  const RETRY_MS = 30000;
+  const cache = new Map(); // "sl|form" -> Promise<string[]>
+  const failedAt = new Map(); // "sl|form" -> timestamp of last failure
   let scanScheduled = false;
-  const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+  let rafId = 0;
 
-  function addStyles() {
-    if (document.getElementById(STYLE_ID)) return;
-    const style = document.createElement('style');
-    style.id = STYLE_ID;
-    style.textContent =
-      '.lln-word[' + MARKER + '="true"] > .tt[' + READY_MARKER + '="true"],' +
-      '.lln-word[' + MARKER + '="true"] > .tt[' + READY_MARKER + '="true"].lln-tt-hidden {' +
-      'opacity:1!important;visibility:visible!important;display:block!important;' +
-      'pointer-events:none!important;z-index:2147483647!important;}';
-    (document.head || document.documentElement).appendChild(style);
+  // ---- Dictionary --------------------------------------------------------
+  function request(url) {
+    if (typeof GM_xmlhttpRequest === 'function') {
+      return new Promise((resolve, reject) => {
+        GM_xmlhttpRequest({
+          method: 'GET',
+          url,
+          responseType: 'json',
+          timeout: 10000,
+          onload: res => {
+            if (res.status < 200 || res.status >= 300) {
+              reject(new Error('HTTP ' + res.status));
+              return;
+            }
+            try {
+              resolve(typeof res.response === 'object' && res.response
+                ? res.response
+                : JSON.parse(res.responseText));
+            } catch (error) { reject(error); }
+          },
+          onerror: () => reject(new Error('network error')),
+          ontimeout: () => reject(new Error('timeout'))
+        });
+      });
+    }
+    return fetch(url).then(res => {
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return res.json();
+    });
   }
 
+  function lookup(form, sourceLang) {
+    const key = sourceLang + '|' + form;
+    if (cache.has(key)) return cache.get(key);
+    if (Date.now() - (failedAt.get(key) || 0) < RETRY_MS) {
+      return Promise.reject(new Error('cooling down'));
+    }
+    const params = new URLSearchParams({
+      form, lemma: '', sl: sourceLang, tl: TARGET_LANG, pos: '', pow: 'n'
+    });
+    const promise = request(DICT_URL + '?' + params)
+      .then(json => {
+        const entries = json?.data?.hoverDictEntries;
+        if (!Array.isArray(entries)) return [];
+        // Drop romanization like "得る (eru)" and duplicates it leaves behind.
+        const cleaned = entries
+          .map(entry => String(entry).replace(/\s*\([\x20-\x7E]*\)\s*$/, '').trim())
+          .filter(Boolean);
+        return [...new Set(cleaned)];
+      })
+      .catch(error => {
+        cache.delete(key); // Allow a retry after the cooldown.
+        failedAt.set(key, Date.now());
+        console.warn('[LR Don\'t Learn] lookup failed:', form, error);
+        throw error;
+      });
+    cache.set(key, promise);
+    return promise;
+  }
+
+  // ---- Word helpers ------------------------------------------------------
   function isPurple(word) {
     const values = getComputedStyle(word).color.match(/[\d.]+/g);
     if (!values || values.length < 3) return false;
-    const rgb = values.slice(0, 3).map(Number);
-    const distance = Math.sqrt(rgb.reduce(
-      (sum, value, i) => sum + (value - TARGET_PURPLE[i]) ** 2, 0
-    ));
+    const distance = Math.hypot(...values.slice(0, 3).map((v, i) => Number(v) - TARGET_COLOR[i]));
     return distance <= COLOR_TOLERANCE;
   }
 
-  function readWordText(word) {
+  function wordText(word) {
     return [...word.childNodes]
       .filter(node => node.nodeType === Node.TEXT_NODE)
       .map(node => node.textContent)
@@ -62,286 +120,174 @@
       .trim();
   }
 
-  function getTooltip(word) {
-    return word.querySelector(':scope > .tt') || word.querySelector('.tt');
+  // data-word-key looks like "WORD|heavier|en".
+  function wordInfo(word) {
+    const parts = (word.getAttribute('data-word-key') || '').split('|');
+    const form = (parts.length >= 3 ? parts[1] : wordText(word)).trim().toLowerCase();
+    const sourceLang = parts.length >= 3 && parts[parts.length - 1] ? parts[parts.length - 1] : 'en';
+    return form ? { form, sourceLang } : null;
   }
 
-  function dictionaryKey(item) {
-    const wordKey = typeof item.wordKey === 'string'
-      ? item.wordKey
-      : (item.getAttribute('data-word-key') || '');
-    const label = typeof item.label === 'string' ? item.label : readWordText(item);
-    return wordKey + '|' + label;
-  }
-
-  function hasDictionary(word) {
-    return Boolean(getTooltip(word)?.querySelector('.lln-hover-dict-entries'));
-  }
-
-  function applyDictionaryMarkup(word, markup) {
-    let tooltip = getTooltip(word);
-    if (!tooltip) {
-      tooltip = document.createElement('span');
-      tooltip.className = 'tt lln-tt-hidden';
-      word.prepend(tooltip);
-    }
-    if (markup && !tooltip.querySelector('.lln-hover-dict-entries')) {
-      tooltip.innerHTML = markup;
-    }
-    if (!tooltip.querySelector('.lln-hover-dict-entries')) return false;
-    word.setAttribute(MARKER, 'true');
-    tooltip.setAttribute(READY_MARKER, 'true');
-    return true;
-  }
-
-  function cacheVisibleDictionary(word) {
-    const tooltip = getTooltip(word);
-    if (!tooltip?.querySelector('.lln-hover-dict-entries')) return false;
-    dictionaryCache.set(dictionaryKey(word), tooltip.innerHTML);
-    return applyDictionaryMarkup(word, tooltip.innerHTML);
-  }
-
-  function sentenceSignature(container) {
-    if (!container) return '';
-    return [...container.querySelectorAll('.lln-word')]
-      .filter(word => !word.classList.contains('lln-group-part'))
-      .map(word => [
-        word.getAttribute('data-token-index') || '',
-        word.getAttribute('data-word-key') || '',
-        readWordText(word)
-      ].join('~'))
-      .join('|');
-  }
-
-  function describe(word) {
-    const container = word.closest('.lln-subs-text') || word.closest('#lln-subs');
-    const descriptor = {
-      tokenIndex: word.getAttribute('data-token-index') || '',
-      wordKey: word.getAttribute('data-word-key') || '',
-      label: readWordText(word),
-      signature: sentenceSignature(container)
-    };
-    descriptor.id = [
-      descriptor.signature, descriptor.tokenIndex, descriptor.wordKey, descriptor.label
-    ].join('§');
-    descriptor.meaning = dictionaryKey(descriptor);
-    return descriptor;
-  }
-
-  function visibleOnScreen(word) {
-    const rect = word.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0 &&
-      rect.bottom > 0 && rect.right > 0 &&
-      rect.top < window.innerHeight && rect.left < window.innerWidth;
-  }
-
-  function findCurrentWord(descriptor) {
-    const candidates = [...document.querySelectorAll(WORD_SELECTOR)].filter(word =>
-      word.isConnected &&
-      !word.classList.contains('lln-group-part') &&
-      (word.getAttribute('data-token-index') || '') === descriptor.tokenIndex &&
-      (word.getAttribute('data-word-key') || '') === descriptor.wordKey &&
-      readWordText(word) === descriptor.label &&
-      isPurple(word)
-    );
-    if (!candidates.length) return null;
-
-    // Prefer the exact subtitle line, but don't fail if Language Reactor has
-    // re-created the line and changed its markup while resolving the tooltip.
-    const exact = candidates.find(word => {
-      const container = word.closest('.lln-subs-text') || word.closest('#lln-subs');
-      return sentenceSignature(container) === descriptor.signature;
-    });
-    if (exact) return exact;
-    return candidates.find(visibleOnScreen) || candidates[0];
-  }
-
-  function dispatchHover(word) {
-    const rect = word.getBoundingClientRect();
-    const options = {
-      bubbles: true,
-      cancelable: true,
-      view: window,
-      clientX: rect.left + rect.width / 2,
-      clientY: rect.top + rect.height / 2,
-      relatedTarget: document.body
-    };
-    try {
-      word.dispatchEvent(new PointerEvent('pointerover', {
-        ...options, pointerType: 'mouse', isPrimary: true
-      }));
-      word.dispatchEvent(new PointerEvent('pointerenter', {
-        ...options, bubbles: false, pointerType: 'mouse', isPrimary: true
-      }));
-      word.dispatchEvent(new PointerEvent('pointermove', {
-        ...options, pointerType: 'mouse', isPrimary: true
-      }));
-    } catch { /* Older browser fallback below. */ }
-    word.dispatchEvent(new MouseEvent('mouseover', options));
-    word.dispatchEvent(new MouseEvent('mouseenter', { ...options, bubbles: false }));
-    word.dispatchEvent(new MouseEvent('mousemove', options));
-  }
-
-  function dispatchLeave(word) {
-    if (!word) return;
-    const options = {
-      bubbles: true, cancelable: true, view: window, relatedTarget: document.body
-    };
-    try {
-      word.dispatchEvent(new PointerEvent('pointerout', {
-        ...options, pointerType: 'mouse', isPrimary: true
-      }));
-      word.dispatchEvent(new PointerEvent('pointerleave', {
-        ...options, bubbles: false, pointerType: 'mouse', isPrimary: true
-      }));
-    } catch { /* Older browser fallback below. */ }
-    word.dispatchEvent(new MouseEvent('mouseout', options));
-    word.dispatchEvent(new MouseEvent('mouseleave', { ...options, bubbles: false }));
-  }
-
-  function waitForDictionary(descriptor, timeoutMs = 2200) {
-    const initial = findCurrentWord(descriptor);
-    if (initial && hasDictionary(initial)) {
-      return Promise.resolve({ markup: getTooltip(initial).innerHTML });
-    }
-
-    return new Promise(resolve => {
-      let finished = false;
-      const observer = new MutationObserver(check);
-      const timeout = setTimeout(() => finish(null), timeoutMs);
-
-      function finish(result) {
-        if (finished) return;
-        finished = true;
-        clearTimeout(timeout);
-        observer.disconnect();
-        resolve(result);
+  // ---- Rendering ---------------------------------------------------------
+  function addStyles() {
+    if (document.getElementById(STYLE_ID)) return;
+    const style = document.createElement('style');
+    style.id = STYLE_ID;
+    style.textContent = `
+      .${LAYER_CLASS} {
+        position: absolute; left: 0; top: 0; width: 0; height: 0;
+        overflow: visible; pointer-events: none; z-index: 2147483000;
       }
-      function check() {
-        const current = findCurrentWord(descriptor);
-        if (current && hasDictionary(current)) {
-          finish({ markup: getTooltip(current).innerHTML });
+      .${LABEL_CLASS} {
+        position: absolute; transform: translateX(-50%);
+        max-width: 22em; padding: 2px 7px; border-radius: 4px;
+        background: rgba(20, 20, 24, 0.92); color: #fff;
+        border-bottom: 2px solid rgb(184, 148, 197);
+        font: 600 clamp(11px, 0.45em, 18px)/1.35 system-ui, sans-serif;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        text-shadow: none; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+      }
+    `;
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  function getLayer(subs) {
+    const host = subs.parentElement;
+    if (!host) return null;
+    let layer = host.querySelector(':scope > .' + LAYER_CLASS);
+    if (!layer) {
+      layer = document.createElement('div');
+      layer.className = LAYER_CLASS;
+      host.appendChild(layer);
+    }
+    return layer;
+  }
+
+  // Each label is bound to one word element; LR replaces word nodes when the
+  // subtitle line changes, which drops their labels automatically.
+  const labels = new Map(); // word element -> { label, text }
+
+  function setLabel(word, layer, text) {
+    let entry = labels.get(word);
+    if (!entry || entry.label.parentElement !== layer) {
+      entry?.label.remove();
+      const label = document.createElement('div');
+      label.className = LABEL_CLASS;
+      layer.appendChild(label);
+      entry = { label, text: '' };
+      labels.set(word, entry);
+    }
+    if (entry.text !== text) {
+      entry.text = text;
+      entry.label.textContent = text;
+    }
+  }
+
+  function removeLabel(word) {
+    labels.get(word)?.label.remove();
+    labels.delete(word);
+  }
+
+  function positionLabels() {
+    rafId = 0;
+    const placed = [];
+    const entries = [...labels.entries()]
+      .filter(([word, { label }]) => {
+        if (word.isConnected && label.isConnected) return true;
+        label.remove();
+        labels.delete(word);
+        return false;
+      })
+      .map(([word, { label }]) => ({ word, label, rect: word.getBoundingClientRect() }))
+      .sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+
+    for (const { label, rect } of entries) {
+      const layerRect = label.parentElement.getBoundingClientRect();
+      if (!rect.width) {
+        label.style.display = 'none';
+        continue;
+      }
+      label.style.display = '';
+      const width = label.offsetWidth;
+      const height = label.offsetHeight;
+      const centerX = rect.left + rect.width / 2;
+      let top = rect.top - height - 2;
+      // Lift labels that would overlap a label already placed on this line.
+      for (let moved = true; moved;) {
+        moved = false;
+        for (const other of placed) {
+          const overlapX = Math.abs(other.centerX - centerX) < (other.width + width) / 2 + 4;
+          const overlapY = top < other.top + other.height && top + height > other.top;
+          if (overlapX && overlapY) {
+            top = other.top - height - 2;
+            moved = true;
+          }
         }
       }
-      // Observe the document because Language Reactor can replace the hovered node.
-      observer.observe(document.documentElement, {
-        childList: true, subtree: true, characterData: true,
-        attributes: true, attributeFilter: ['class', 'style', 'data-word-key']
-      });
-      check();
-    });
-  }
-
-  async function processQueue() {
-    if (processing) return;
-    processing = true;
-    try {
-      while (queue.length) {
-        const descriptor = queue.shift();
-        queued.delete(descriptor.id);
-        const state = processed.get(descriptor.id) || { attempts: 0 };
-        const word = findCurrentWord(descriptor);
-        if (!word) {
-          processed.set(descriptor.id, {
-            status: 'failed', attempts: state.attempts || 0, lastAttempt: Date.now()
-          });
-          continue;
-        }
-
-        const cached = dictionaryCache.get(descriptor.meaning);
-        if (cached && applyDictionaryMarkup(word, cached)) {
-          processed.set(descriptor.id, { status: 'ready', attempts: state.attempts || 0 });
-          continue;
-        }
-        if (cacheVisibleDictionary(word)) {
-          processed.set(descriptor.id, { status: 'ready', attempts: state.attempts || 0 });
-          continue;
-        }
-
-        const attempts = (state.attempts || 0) + 1;
-        processed.set(descriptor.id, { status: 'queued', attempts, lastAttempt: Date.now() });
-        dispatchHover(word);
-        const result = await waitForDictionary(descriptor);
-
-        if (result?.markup) {
-          dictionaryCache.set(descriptor.meaning, result.markup);
-          // Keep the dictionary markup even if leaving hover makes LR clear it.
-          const current = findCurrentWord(descriptor) || word;
-          dispatchLeave(current);
-          await delay(80);
-          const fresh = findCurrentWord(descriptor) || (word.isConnected ? word : null);
-          if (fresh) applyDictionaryMarkup(fresh, result.markup);
-          processed.set(descriptor.id, { status: 'ready', attempts });
-        } else {
-          dispatchLeave(findCurrentWord(descriptor) || word);
-          processed.set(descriptor.id, { status: 'failed', attempts, lastAttempt: Date.now() });
-          if (attempts < 3) setTimeout(scheduleScan, 1800);
-        }
-        await delay(140);
-      }
-    } finally {
-      processing = false;
-      if (queue.length) void processQueue();
+      placed.push({ centerX, top, width, height });
+      label.style.left = (centerX - layerRect.left) + 'px';
+      label.style.top = (top - layerRect.top) + 'px';
     }
+    if (labels.size) rafId = requestAnimationFrame(positionLabels);
   }
 
+  function ensurePositioning() {
+    if (!rafId && labels.size) rafId = requestAnimationFrame(positionLabels);
+  }
+
+  // ---- Scan --------------------------------------------------------------
   function scan() {
     addStyles();
-    for (const word of document.querySelectorAll(WORD_SELECTOR)) {
-      if (word.classList.contains('lln-group-part')) continue;
-
-      if (!isPurple(word)) {
-        // Only remove our readiness marker when the word is no longer Don't Learn.
-        word.removeAttribute(MARKER);
-        getTooltip(word)?.removeAttribute(READY_MARKER);
-        continue;
+    const seen = new Set();
+    for (const subs of document.querySelectorAll(SUBS_SELECTOR)) {
+      const layer = getLayer(subs);
+      if (!layer) continue;
+      for (const word of subs.querySelectorAll(WORD_SELECTOR)) {
+        if (!isPurple(word)) continue;
+        const info = wordInfo(word);
+        if (!info) continue;
+        seen.add(word);
+        if (!labels.has(word)) setLabel(word, layer, '…');
+        lookup(info.form, info.sourceLang).then(
+          meanings => {
+            if (!word.isConnected || !labels.has(word)) return;
+            if (meanings.length) setLabel(word, layer, meanings.slice(0, MAX_MEANINGS).join('・'));
+            else removeLabel(word);
+          },
+          () => { if (labels.has(word)) removeLabel(word); }
+        );
       }
-
-      const descriptor = describe(word);
-      word.setAttribute(MARKER, 'true');
-
-      const cached = dictionaryCache.get(descriptor.meaning);
-      if (cached && applyDictionaryMarkup(word, cached)) {
-        processed.set(descriptor.id, { status: 'ready', attempts: 0 });
-        continue;
-      }
-      if (cacheVisibleDictionary(word)) {
-        processed.set(descriptor.id, { status: 'ready', attempts: 0 });
-        continue;
-      }
-      if (!visibleOnScreen(word)) continue;
-
-      const state = processed.get(descriptor.id);
-      if (state?.status === 'ready' || state?.status === 'queued') continue;
-      if ((state?.attempts || 0) >= 3) continue;
-      if (Date.now() - (state?.lastAttempt || 0) < 2000) continue;
-      if (queued.has(descriptor.id)) continue;
-
-      queued.add(descriptor.id);
-      processed.set(descriptor.id, {
-        status: 'queued', attempts: state?.attempts || 0, lastAttempt: state?.lastAttempt || 0
-      });
-      queue.push(descriptor);
     }
-    void processQueue();
+    for (const word of [...labels.keys()]) {
+      if (!seen.has(word)) removeLabel(word);
+    }
+    ensurePositioning();
   }
 
   function scheduleScan() {
     if (scanScheduled) return;
     scanScheduled = true;
-    requestAnimationFrame(() => {
+    setTimeout(() => {
       scanScheduled = false;
       scan();
-    });
+    }, 50);
   }
 
-  const observer = new MutationObserver(scheduleScan);
-  observer.observe(document.documentElement, {
+  new MutationObserver(mutations => {
+    // Ignore our own label updates.
+    for (const m of mutations) {
+      const target = m.target.nodeType === 1 ? m.target : m.target.parentElement;
+      if (!target?.closest?.('.' + LAYER_CLASS)) {
+        scheduleScan();
+        return;
+      }
+    }
+  }).observe(document.documentElement, {
     childList: true,
     subtree: true,
     characterData: true,
     attributes: true,
-    attributeFilter: ['style', 'class', 'data-word-key', 'data-token-index']
+    attributeFilter: ['style', 'class', 'data-word-key']
   });
   scan();
 })();

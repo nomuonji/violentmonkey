@@ -14,8 +14,10 @@ Language Reactorの字幕で、Don't Learn に設定された紫色の単語の�
 - Source: [`scripts/language-reactor-dont-learn-translation.user.js`](./scripts/language-reactor-dont-learn-translation.user.js)
 - Install / update: https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/language-reactor-dont-learn-translation.user.js
 - **対象**: YouTube / Netflix 上の Language Reactor 字幕。
-- **動作**: 字幕単語の色が Don't Learn の紫色（例: `rgb(184, 148, 197)`）に一致した場合に限り、辞書を表示するためのホバーイベントを短時間発生させます。日本語の辞書項目がDOMに生成された後は、その単語の訳をホバーなしでも表示します。字幕が差し替わった場合も新しい単語を監視します。
-- **注意**: Language Reactor側の色・DOM構造が変わると調整が必要です。実ブラウザでのE2E確認は未実施です。
+- **動作**: 動画上の字幕で、色が Don't Learn の紫色（`rgb(184, 148, 197)` 付近）の単語を検出し、その単語の上に日本語の意味（最大3つ）を常時表示します。字幕が切り替わると自動で付け替え、隣り合う単語のラベルは重ならないよう段積みします。
+- **仕組み**: Language Reactorの辞書ポップは実際のマウス操作でしか開かないため、ホバーの偽装はせず、LRがホバー辞書に使っている辞書API（`api-cdn-plus.dioco.io`）を単語ごとに直接引いています（同じ単語は1回だけ取得してキャッシュ）。
+- **設定**: スクリプト冒頭の `TARGET_LANG`（訳の言語）、`TARGET_COLOR`（紫色）、`MAX_MEANINGS` で調整できます。
+- **注意**: 対象は動画上の字幕（`#lln-subs`）で、右側のサイドバー字幕は対象外です。Language Reactor側のAPI・色・DOM構造が変わると調整が必要です。YouTubeでは実ブラウザで表示を確認済み、Netflixは未確認です。
 
 ### X Inline Translator（Chrome組み込みAI）
 
