@@ -7,6 +7,16 @@
 
 ## Scripts
 
+### Language Reactor Don't Learn Translations
+
+Language Reactorの字幕で、Don't Learn に設定された紫色の単語の辞書訳を常時表示します。
+
+- Source: [`scripts/language-reactor-dont-learn-translation.user.js`](./scripts/language-reactor-dont-learn-translation.user.js)
+- Install / update: https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/language-reactor-dont-learn-translation.user.js
+- **対象**: YouTube / Netflix 上の Language Reactor 字幕。
+- **動作**: 字幕単語の色が Don't Learn の紫色（例: `rgb(184, 148, 197)`）に一致した場合に限り、辞書を表示するためのホバーイベントを短時間発生させます。日本語の辞書項目がDOMに生成された後は、その単語の訳をホバーなしでも表示します。字幕が差し替わった場合も新しい単語を監視します。
+- **注意**: Language Reactor側の色・DOM構造が変わると調整が必要です。実ブラウザでのE2E確認は未実施です。
+
 ### X Inline Translator（Chrome組み込みAI）
 
 Xのタイムライン上で投稿を日本語へ翻訳し、選択した英単語・フレーズの日本語訳をポップアップ表示します。既存の `X Lightweight` と併用できます。
