@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Language Reactor Don't Learn Translations
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      1.0.1
+// @version      1.0.2
 // @description  Keep dictionary meanings visible for purple (Don't Learn) Language Reactor subtitle words.
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -153,12 +153,14 @@
     };
     try {
       word.dispatchEvent(new PointerEvent('pointerout', {
-        ...options,
-        pointerType: 'mouse',
-        isPrimary: true
+        ...options, pointerType: 'mouse', isPrimary: true
+      }));
+      word.dispatchEvent(new PointerEvent('pointerleave', {
+        ...options, bubbles: false, pointerType: 'mouse', isPrimary: true
       }));
     } catch { /* PointerEvent may be unavailable in older browsers. */ }
     word.dispatchEvent(new MouseEvent('mouseout', options));
+    word.dispatchEvent(new MouseEvent('mouseleave', { ...options, bubbles: false }));
   }
 
   async function processQueue() {
@@ -181,11 +183,24 @@
         dispatchHover(word);
         const loaded = await waitForDictionary(word);
 
-        // Do NOT dispatch mouseleave after a successful lookup: Language Reactor
-        // may clear the populated dictionary on leave. Keep the populated tooltip
-        // in place and let our CSS reveal it. Clean up only failed attempts.
-        if (loaded && keepDictionaryVisible(word)) {
-          processed.set(word, { key, status: 'ready', attempts });
+        if (loaded && dictionaryIsReady(word)) {
+          // Release Language Reactor's current hover state so the next purple
+          // word can open its own dictionary. Some LR versions clear the tooltip
+          // on pointerleave, so keep a copy and restore it if that happens.
+          const loadedTooltip = getTooltip(word);
+          const savedMarkup = loadedTooltip?.innerHTML || '';
+          dispatchLeave(word);
+          const currentTooltip = getTooltip(word);
+          if (savedMarkup && currentTooltip &&
+              !currentTooltip.querySelector('.lln-hover-dict-entries')) {
+            currentTooltip.innerHTML = savedMarkup;
+          }
+          if (keepDictionaryVisible(word)) {
+            processed.set(word, { key, status: 'ready', attempts });
+          } else {
+            processed.set(word, { key, status: 'attempted', attempts, lastAttempt: Date.now() });
+            if (attempts < 3) setTimeout(scheduleScan, 2200);
+          }
         } else {
           dispatchLeave(word);
           processed.set(word, { key, status: 'attempted', attempts, lastAttempt: Date.now() });
