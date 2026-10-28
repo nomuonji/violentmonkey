@@ -82,7 +82,8 @@
     'of in to on at is it an by as or be me we do so no if up my am us he she they them his her ' +
     '動画 公式 チャンネル 紹介 まとめ ライブ 配信 生配信 について する した して です ます これ それ ' +
     'あの この その こと もの ため よう さん ちゃん くん たち 完全 最新 最強 必見 話題 衝撃 本当 ' +
-    '今日 今回 前編 後編 www 年版 ver 第一 第二'
+    '今日 今回 前編 後編 www 年版 ver 第一 第二 時間 好き 理由 人生 問題 方法 解説 語る 悪い 非公式 周年 放送 無料 ' +
+    '全部 最後 最初 自分 みんな 本気 意味 結果 結論 真相 秘密 sp'
   ).split(/\s+/).filter(Boolean));
 
   const SEGMENTER = (typeof Intl !== 'undefined' && Intl.Segmenter)
