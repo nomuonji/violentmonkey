@@ -105,7 +105,16 @@
     const t = norm(text).replace(/https?:\/\/\S+/g, ' ');
     const raw = [];
     if (SEGMENTER) {
-      for (const s of SEGMENTER.segment(t)) if (s.isWordLike) raw.push(s.segment);
+      // 「ゲンロン」が「ゲン」「ロン」に割れるなど、カタカナ語は分割されやすいので隣接するカタカナ片をつなぎ直す
+      const KATA = /^[\p{Script=Katakana}ー・]+$/u;
+      let prevEnd = -1; let prevKata = false;
+      for (const s of SEGMENTER.segment(t)) {
+        if (!s.isWordLike) { prevEnd = -1; prevKata = false; continue; }
+        const kata = KATA.test(s.segment);
+        if (kata && prevKata && prevEnd === s.index && raw.length) raw[raw.length - 1] += s.segment;
+        else raw.push(s.segment);
+        prevEnd = s.index + s.segment.length; prevKata = kata;
+      }
     } else {
       raw.push(...t.split(/[^\p{L}\p{N}]+/u));
     }
