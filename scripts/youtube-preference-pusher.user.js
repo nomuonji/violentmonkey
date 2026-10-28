@@ -79,6 +79,7 @@
     'the and for with you your this that from are was how what why who when not but all can will ' +
     'official video videos music mv pv shorts short live full part episode ep vol new feat ft vs ' +
     'channel youtube top best one two out get got has have just more about into over its our ' +
+    'of in to on at is it an by as or be me we do so no if up my am us he she they them his her ' +
     '動画 公式 チャンネル 紹介 まとめ ライブ 配信 生配信 について する した して です ます これ それ ' +
     'あの この その こと もの ため よう さん ちゃん くん たち 完全 最新 最強 必見 話題 衝撃 本当 ' +
     '今日 今回 前編 後編 www 年版 ver 第一 第二'
@@ -543,10 +544,10 @@
         playlists.push({ id: p.playlistId, title: ytText(p.title) });
         return;
       }
-      if (o.continuationItemRenderer) {
-        const c = o.continuationItemRenderer;
-        const tok = (c.continuationEndpoint && c.continuationEndpoint.continuationCommand && c.continuationEndpoint.continuationCommand.token) ||
-          (c.button && JSON.stringify(c.button).match(/"token":"([^"]+)"/) || [])[1];
+      if (o.continuationItemRenderer || o.continuationItemViewModel) {
+        // 旧: continuationItemRenderer.continuationEndpoint.continuationCommand.token
+        // 新: continuationItemViewModel.continuationCommand.innertubeCommand.continuationCommand.token
+        const tok = (JSON.stringify(o.continuationItemRenderer || o.continuationItemViewModel).match(/"token":"([^"]+)"/) || [])[1];
         if (tok) continuation = tok;
         return;
       }
