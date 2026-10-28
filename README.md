@@ -19,6 +19,24 @@ Language Reactorの字幕で、Don't Learn に設定された紫色の単語の�
 - **設定**: スクリプト冒頭の `TARGET_LANG`（訳の言語）、`TARGET_COLOR`（紫色）、`MAX_MEANINGS` で調整できます。
 - **注意**: 対象は動画上の字幕（`#lln-subs`）で、右側のサイドバー字幕は対象外です。Language Reactor側のAPI・色・DOM構造が変わると調整が必要です。YouTubeでは実ブラウザで表示を確認済み、Netflixは未確認です。
 
+### YouTube Preference Pusher
+
+YouTubeのおすすめを**自分の好みで採点し直す**スクリプトです。YouTube側のアルゴリズムはそのままに、画面に出てきた動画を並べ替え・薄表示・非表示し、好きなチャンネルの新着やキーワード検索から集めた「好み枠」をホーム上部に差し込みます。
+
+- Source: [`scripts/youtube-preference-pusher.user.js`](./scripts/youtube-preference-pusher.user.js)
+- Install / update: https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/youtube-preference-pusher.user.js
+- **好みの入れ方（併用）**
+  - 手動: 好きなチャンネル（`@handle`・URL・`UC…`・名前）、好きなキーワード（`/正規表現/` 可）、NGチャンネル、NGキーワード。末尾 ` | 2` で重み。
+  - 自動学習: 高評価した動画、選んだ再生リスト（他人の公開リストも可）、登録チャンネル、任意で「後で見る」と視聴履歴。タイトルの語は、普段フィードに流れてくる動画と比べて「自分の好みに特有な語」だけを重み付けします（「動画」「解説」のような汎用語は自動的に弱くなる）。
+  - カード上の 👍 / 👎 / 🚫 ボタンで少しずつ育てる。
+- **表示**: スコアが高い動画は緑枠＋上へ、好み要素がない動画は薄く（設定で「隠す」も可）、NGは非表示。ホームと関連動画は「読み込まれた塊ごと」に並べ替えるので、見ている途中の上の方は動きません。検索結果はNG非表示とスコア表示だけ。
+- **好み枠**: 好きなチャンネル・学習したチャンネルのRSS新着と、好きなキーワード・学習した語での「今月/今週」の検索結果から、採点上位を1チャンネル最大2本まで並べます（既定4時間ごとに更新、見た動画と✕で外した動画は出さない）。検索はログインなしで送るので、自分の検索履歴には残らず、パーソナライズもされません。
+- **「興味なし」の送信（C）**: 👎 は「興味なし」、🚫 は「チャンネルをおすすめに表示しない」を、そのカードのメニューからYouTubeにも送ります。設定パネルの「操作」タブから、いま画面にある薄い動画へ一括で送ることもできます（押したときだけ、1件ずつ間隔をあけて実行）。
+- **しないこと**: 自動再生・自動高評価などでYouTubeを「調教」する操作はしません。通信は youtube.com 内だけで、外部サーバーには何も送りません。
+- **設定**: 画面左下の 🎯 ボタン、またはViolentmonkeyのメニュー。データ（設定・学習結果）はこのブラウザのViolentmonkeyにだけ保存され、「データ」タブでエクスポート／インポートできます。
+- **初回**: インストール後しばらくすると自動で一度学習します（以後は既定7日ごと）。高評価が少ない場合は「学習」タブで視聴履歴や再生リストを足してください。
+- **注意**: YouTubeのDOMや内部APIが変わると調整が必要です。2026-10時点のホーム（`yt-lockup-view-model` 系の新UI）・メニュー構造・内部APIの応答形式は実ブラウザで確認済み。動画ページの関連動画と検索結果は、視聴・検索履歴を汚さないため実ページでの確認は未実施です。
+
 ### Language Reactor Word Stock
 
 Language Reactorの字幕で、覚えたい英単語を **Alt+クリック**（MacはOption+クリック）すると、Googleスプレッドシートにストックします。
@@ -138,6 +156,7 @@ violentmonkey/
 │   ├── chatgpt-lightweight.user.js
 │   ├── x-inline-translator.user.js
 │   ├── x-lightweight.user.js
+│   ├── youtube-preference-pusher.user.js
 │   └── youtube-lightweight.user.js
 ├── README.md
 └── SECURITY.md
