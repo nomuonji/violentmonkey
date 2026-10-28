@@ -288,13 +288,14 @@
   function termWeights(fg, bg, ignore) {
     const out = new Map();
     if (!fg || fg.N <= 0) return out;
-    const minDf = fg.N < 15 ? 1 : 2;
+    const minDf = fg.N < 15 ? 1 : Math.max(2, Math.ceil(fg.N * 0.004));
     const B = (bg && bg.N) || 0;
     for (const [t, l] of Object.entries(fg.df)) {
       if (l < minDf || (ignore && ignore.has(t))) continue;
       const pl = (l + 0.5) / (fg.N + 1);
       const b = (bg && bg.df[t]) || 0;
-      const pb = (b + 1) / (B + 50);
+      // 背景（普段のフィード）での出現率。背景が少ないうちは「一般的な語の出現率」0.3% を事前分布として混ぜる
+      const pb = 0.7 * ((b + 0.5) / (B + 300)) + 0.3 * 0.003;
       const w = clamp(Math.log(pl / pb), -1, 2.5);
       if (w > 0.3) out.set(t, w);
     }
