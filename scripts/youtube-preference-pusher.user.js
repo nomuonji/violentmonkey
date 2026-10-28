@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Preference Pusher
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      1.1.0
+// @version      1.2.0
 // @description  YouTubeのおすすめを自分の好み（手動リスト＋高評価・再生リスト・登録チャンネルからの学習）で採点し、並べ替え・薄表示・好み枠の差し込み・ワンクリックの「興味なし」送信を行います。
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -27,7 +27,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.1.0';
+  const VERSION = '1.2.0';
   const NS = 'ypp';
 
   // ======================================================================
@@ -44,7 +44,8 @@
     boostAt: 1.5,          // これ以上は「好み」として強調・上へ
     dimAt: 0,              // これ以下は「好み要素なし」として薄く
     lowAction: 'dim',      // dim | hide | none
-    dimOpacity: 0.6,       // 薄く表示するときの不透明度（1で通常）
+    dimOpacity: 0.8,       // 薄く表示するときの不透明度（1で通常）
+    settingsRev: 2,
     showChips: 'marked',   // marked | all | none
     hideShorts: false,
     minViews: 0,
@@ -719,8 +720,15 @@
     bulkBusy: false,
   };
 
+  // 旧版の既定値（0.38 → 0.6）のまま保存されている薄さを新しい既定値へ
+  if ((state.settings.settingsRev || 0) < 2) {
+    if (state.settings.dimOpacity == null || state.settings.dimOpacity <= 0.6) state.settings.dimOpacity = DEFAULT_SETTINGS.dimOpacity;
+    state.settings.settingsRev = 2;
+    store.set('settings', state.settings);
+  }
+
   function rebuild() {
-    try { document.documentElement.style.setProperty('--ypp-dim-opacity', String(clamp(Number(state.settings.dimOpacity) || 0.6, 0.1, 1))); } catch (_) { /* noop */ }
+    try { document.documentElement.style.setProperty('--ypp-dim-opacity', String(clamp(Number(state.settings.dimOpacity) || 0.8, 0.1, 1))); } catch (_) { /* noop */ }
     state.manual = parseManual(state.manualText);
     state.model = buildModel({
       learned: state.learned, fb: state.fb, watch: state.watch, bg: state.bg, ignore: state.ignore, settings: state.settings,
@@ -1052,7 +1060,28 @@
       grid.insertBefore(shelfEl, contents || grid.firstChild);
       renderShelf();
     }
-    refreshShelf(false);
+    // v1.0 の保存データには候補プールがないので、一度だけ取り直す
+    const noPool = state.shelf.at && !(state.shelf.pool && state.shelf.pool.length) && !state.poolForced;
+    if (noPool) state.poolForced = true;
+    refreshShelf(noPool);
+  }
+
+  // YouTubeのホームが1行に並べている本数に合わせる（横スクロールさせず、はみ出す分は次の行へ回す）
+  function fitCols() {
+    const grid = document.querySelector('ytd-browse[page-subtype="home"] ytd-rich-grid-renderer');
+    if (grid) {
+      const v = parseInt(getComputedStyle(grid).getPropertyValue('--ytd-rich-grid-items-per-row'), 10);
+      if (v > 0) return clamp(v, 2, 8);
+    }
+    const w = ((grid && grid.clientWidth) || 1200) - 40;
+    return clamp(Math.floor((w + 12) / (220 + 12)), 2, 8);
+  }
+
+  function makeRow(items, cols) {
+    const row = h('div', { class: 'ypp-shelf-row' });
+    row.style.setProperty('--ypp-cols', String(cols));
+    for (const v of items) row.append(shelfCard(v));
+    return row;
   }
 
   function ago(days) {
@@ -1090,9 +1119,7 @@
       shelfEl.append(h('div', { class: 'ypp-shelf-empty' }, state.shelfBusy ? '好きなチャンネルの新着とキーワード検索から集めています…' : (sh.note || 'まだ候補がありません。「設定」から好きなチャンネル・キーワードを入れるか、「学習」を実行してください。')));
       return;
     }
-    const row = h('div', { class: 'ypp-shelf-row' });
-    for (const v of items) row.append(shelfCard(v));
-    shelfEl.append(row);
+    shelfEl.append(makeRow(items, state.topCols || fitCols()));
   }
 
   function dismissVideo(videoId) {
@@ -1111,7 +1138,13 @@
       ),
       h('button', {
         class: 'ypp-sc-x', title: 'この動画を好み枠から外す',
-        onclick: (ev) => { ev.preventDefault(); ev.stopPropagation(); dismissVideo(v.videoId); card.remove(); },
+        onclick: (ev) => {
+          ev.preventDefault(); ev.stopPropagation();
+          dismissVideo(v.videoId);
+          // 空いた所はプールの次の動画で埋める
+          const next = takeFromPool(shelfPool(), 1, state.inline.shown, { watched: state.watch.ids, dismissed: state.dismissed, perChannel: 99 });
+          if (next[0]) card.replaceWith(shelfCard(next[0])); else card.remove();
+        },
       }, '✕'),
       h('a', { class: 'ypp-sc-title', href, title: v.title }, v.title),
       h('div', { class: 'ypp-sc-meta' }, [v.channelName, fmtViews(v.views), ago(v.ageDays)].filter(Boolean).join(' · ')),
@@ -1136,7 +1169,8 @@
   function topShelfItems() {
     syncInlineEpoch();
     if (!state.topItems) {
-      state.topItems = takeFromPool(shelfPool(), state.settings.shelfCount, state.inline.shown, {
+      state.topCols = fitCols();
+      state.topItems = takeFromPool(shelfPool(), state.topCols, state.inline.shown, {
         watched: state.watch.ids, dismissed: state.dismissed, perChannel: state.settings.shelfPerChannel,
       });
     }
@@ -1168,12 +1202,12 @@
       const key = bt.b;
       let el = state.inline.rows.get(key);
       if (el === undefined) {
-        const items = takeFromPool(shelfPool(), state.settings.inlineCount, state.inline.shown, {
+        const cols = fitCols();
+        const items = takeFromPool(shelfPool(), cols, state.inline.shown, {
           watched: state.watch.ids, dismissed: state.dismissed, perChannel: state.settings.shelfPerChannel,
         });
         if (!items.length) { state.inline.rows.set(key, null); continue; }
-        const row = h('div', { class: 'ypp-shelf-row' });
-        for (const v of items) row.append(shelfCard(v));
+        const row = makeRow(items, cols);
         el = h('div', { class: 'ypp-inline' },
           h('div', { class: 'ypp-shelf-head' },
             h('span', { class: 'ypp-shelf-title' }, '🎯 好み枠のつづき'),
@@ -1346,6 +1380,7 @@
   // バッチ（読み込まれた塊）ごとに並べ替える。既に見えている上の方は動かさない。
   const batchOf = new Map();
   let batchCounter = 0;
+  let lastNewKeyAt = 0;
 
   function reorder(groups, surface, apply = true) {
     const result = new Map();
@@ -1358,7 +1393,9 @@
       for (const c of cards) {
         const k = state.epoch + ':' + c.info.videoId;
         if (!batchOf.has(k)) {
-          if (newBatch == null) newBatch = ++batchCounter;
+          // 1秒以内に続けて現れた動画は同じ塊（最初のページが何回かに分けて描画されるため）
+          if (newBatch == null) newBatch = (Date.now() - lastNewKeyAt < 1000 && batchCounter) ? batchCounter : ++batchCounter;
+          lastNewKeyAt = Date.now();
           batchOf.set(k, newBatch);
         }
         c.batch = batchOf.get(k);
@@ -1431,6 +1468,7 @@
       for (const p of parents) for (const c of p.children) if (c.style.order) c.style.order = '';
     }
     const batchInfo = groups.size ? reorder(groups, surface, reorderOn) : new Map();
+    if (state.selecting && selBar && !state.bulkBusy) renderSelBar();
     if (surface === 'home') {
       ensureShelf();
       for (const [parent, batches] of batchInfo) {
@@ -1547,11 +1585,80 @@
     return true;
   }
 
-  async function bulkNotInterested() {
+  // ---- 選んで「興味なし」 -------------------------------------------------------
+  // 選択モード中はカードをクリックすると選択／解除（動画は開かない）。最初は点数がマイナスの動画だけ選んだ状態。
+  const selection = new Set();
+  let selBar = null;
+
+  function selectable() {
+    return [...document.querySelectorAll('.ypp-card')].filter((el) => visible(el) && !el.classList.contains('ypp-hidden'));
+  }
+
+  function setSelected(el, on) {
+    if (on) selection.add(el); else selection.delete(el);
+    el.classList.toggle('ypp-selected', on);
+  }
+
+  function startSelect() {
+    if (state.selecting) return;
+    closePanel();
+    state.selecting = true;
+    document.documentElement.classList.add('ypp-selecting');
+    selection.clear();
+    for (const el of selectable()) {
+      const r = scoreCache.get((infoCache.get(el) || {}).videoId);
+      setSelected(el, !!(r && r.r.score < 0));
+    }
+    window.addEventListener('click', onSelectClick, true);
+    renderSelBar();
+  }
+
+  function stopSelect() {
+    state.selecting = false;
+    document.documentElement.classList.remove('ypp-selecting');
+    for (const el of selection) el.classList.remove('ypp-selected');
+    selection.clear();
+    window.removeEventListener('click', onSelectClick, true);
+    if (selBar) { selBar.remove(); selBar = null; }
+  }
+
+  function onSelectClick(ev) {
+    if (!state.selecting || state.bulkBusy) return;
+    if (ev.target.closest && ev.target.closest('#ypp-selbar, #ypp-panel, #ypp-fab')) return;
+    const card = ev.target.closest && ev.target.closest('.ypp-card');
+    if (!card) return;
+    ev.preventDefault(); ev.stopImmediatePropagation();
+    setSelected(card, !selection.has(card));
+    renderSelBar();
+  }
+
+  function renderSelBar() {
+    if (!selBar) { selBar = h('div', { id: 'ypp-selbar' }); document.body.append(selBar); }
+    clear(selBar);
+    for (const el of [...selection]) if (!el.isConnected) selection.delete(el);
+    const pick = (fn) => { for (const el of selectable()) setSelected(el, fn(el)); renderSelBar(); };
+    const scoreOfEl = (el) => { const r = scoreCache.get((infoCache.get(el) || {}).videoId); return r ? r.r.score : 0; };
+    selBar.append(...[
+      h('strong', null, state.bulkBusy ? bulkStatusText : `「興味なし」を送る動画を選択中: ${selection.size} 件`),
+      h('span', { class: 'ypp-selhint' }, state.bulkBusy ? '' : 'カードをクリックで選択／解除'),
+      state.bulkBusy
+        ? h('button', { onclick: () => { state.bulkStop = true; } }, '停止')
+        : [
+          h('button', { onclick: () => pick((el) => scoreOfEl(el) < 0) }, 'マイナスだけ'),
+          h('button', { onclick: () => pick((el) => el.classList.contains('ypp-dim')) }, '薄い動画すべて'),
+          h('button', { onclick: () => pick(() => false) }, '全解除'),
+          h('button', { class: 'ypp-danger', disabled: !selection.size, onclick: () => bulkNotInterested([...selection]) }, `${selection.size} 件に送る`),
+          h('button', { onclick: stopSelect }, 'やめる'),
+        ],
+    ].flat());
+  }
+
+  async function bulkNotInterested(targetsIn) {
     if (state.bulkBusy) { state.bulkStop = true; return; }
-    const targets = [...document.querySelectorAll('.ypp-card.ypp-dim')].filter((el) => visible(el));
-    if (!targets.length) { toast('いま画面に「薄く表示」の動画はありません'); return; }
+    const targets = (targetsIn || []).filter((el) => el.isConnected);
+    if (!targets.length) { toast('選ばれた動画がありません'); return; }
     state.bulkBusy = true; state.bulkStop = false;
+    renderSelBar();
     renderPanel();
     let ok = 0; let ng = 0;
     for (const el of targets) {
@@ -1565,13 +1672,14 @@
         if (info) { addDoc(state.fb.neg, info.tokens, 1); bumpChannel(info, -0.3); }
       } else ng++;
       setBulkStatus(`送信中… ${ok + ng}/${targets.length}（成功 ${ok}）`);
+      if (selBar) renderSelBar();
       await sleep(jitter(900, 1600));
     }
     state.bulkBusy = false;
     saveFb();
     const msg = `「興味なし」を ${ok} 件送りました` + (ng ? `（${ng} 件はメニューが見つからず未送信）` : '') + (state.bulkStop ? '（途中で停止）' : '');
     setBulkStatus(msg); toast(msg, ng ? 'warn' : 'ok', 6000);
-    renderPanel();
+    stopSelect();
   }
 
   let bulkStatusText = '';
@@ -1810,7 +1918,6 @@
       h('div', { class: 'ypp-box' },
         h('div', { class: 'ypp-label' }, '好み枠（ホーム上部に差し込み）'),
         checkInput('shelf', '好み枠を表示する', () => ensureShelf()),
-        field('表示する本数', numInput('shelfCount', 1, 4)),
         field('更新間隔（時間）', numInput('shelfRefreshHours', 1, 1)),
         field('何日以内の動画から選ぶか', numInput('shelfMaxAgeDays', 1, 1)),
         field('キーワード検索の期間', selectInput('shelfPeriod', [['week', '今週'], ['month', '今月']])),
@@ -1818,7 +1925,7 @@
         field('新着を見るチャンネル数', numInput('shelfChannels', 1, 0)),
         checkInput('shelfUseLearnedTerms', '学習した語でも検索する'),
         checkInput('shelfInterleave', 'スクロールで読み込まれる分ごとに「好み枠のつづき」を1行挟む', () => resetShelfPicks(true)),
-        field('↑ 1行あたりの本数', numInput('inlineCount', 1, 2))),
+        h('small', null, '本数は、ホームの1行に並ぶ本数に自動で合わせます（横スクロールなし。入りきらない分は次の行へ）')),
     );
   }
 
@@ -1826,10 +1933,10 @@
     const dimCount = [...document.querySelectorAll('.ypp-card.ypp-dim')].filter((el) => visible(el)).length;
     body.append(
       h('div', { class: 'ypp-box' },
-        h('div', { class: 'ypp-label' }, '一括「興味なし」'),
-        h('p', { class: 'ypp-help' }, 'このページでここまでに読み込まれた「薄く表示」の動画すべて（スクロールで通り過ぎた分も含む。まだ読み込まれていない分と、隠した動画は対象外）に、YouTubeの「興味なし」を1本ずつ送ります。押したときだけ動き、間隔をあけて順番に処理します。もう一度押すと止まります。'),
+        h('div', { class: 'ypp-label' }, '選んで「興味なし」'),
+        h('p', { class: 'ypp-help' }, `選択モードにすると、画面下にバーが出て、カードをクリックするたびに選択／解除できます（その間は動画を開きません）。最初は点数がマイナスの動画（👎した傾向・苦手な語など）だけが選ばれた状態です。「${'薄い動画すべて'}」で薄い動画（いま ${dimCount} 件）をまとめて選ぶこともできます。送信は1件ずつ間隔をあけて行います。`),
         h('div', { class: 'ypp-row' },
-          h('button', { class: state.bulkBusy ? '' : 'ypp-danger', onclick: bulkNotInterested }, state.bulkBusy ? '停止する' : `薄い動画 ${dimCount} 件に「興味なし」を送る`),
+          h('button', { class: 'ypp-danger', onclick: startSelect }, '選択モードを始める'),
           h('span', { id: 'ypp-bulk-status', class: 'ypp-status' }, bulkStatusText))),
       h('div', { class: 'ypp-box' },
         h('div', { class: 'ypp-label' }, 'カードのボタン'),
@@ -1913,8 +2020,8 @@
     .ypp-inline { flex: 0 0 calc(100% - 16px); width: calc(100% - 16px); box-sizing: border-box; margin: 4px 8px 28px; padding: 10px 14px 12px; border-radius: 14px; background: var(--yt-spec-badge-chip-background, rgba(0,0,0,.05)); color: var(--yt-spec-text-primary, #0f0f0f); font-family: Roboto, system-ui, sans-serif; }
     .ypp-inline .ypp-shelf-title { font-size: 14px; }
     .ypp-inline button { border: 1px solid #8886; background: transparent; color: inherit; border-radius: 8px; padding: 3px 8px; cursor: pointer; font-size: 12px; }
-    .ypp-shelf-row { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 6px; scrollbar-width: thin; }
-    .ypp-sc { position: relative; flex: 0 0 220px; min-width: 0; }
+    .ypp-shelf-row { display: grid; grid-template-columns: repeat(var(--ypp-cols, 4), minmax(0, 1fr)); gap: 12px; padding-bottom: 4px; }
+    .ypp-sc { position: relative; min-width: 0; }
     .ypp-sc-thumb { position: relative; display: block; border-radius: 10px; overflow: hidden; aspect-ratio: 16 / 9; background: #0003; }
     .ypp-sc-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
     .ypp-sc-score { position: absolute; left: 6px; top: 6px; padding: 3px 6px; border-radius: 6px; background: rgba(31,136,61,.92); color: #fff; font-size: 11px; font-weight: 700; }
@@ -1963,6 +2070,18 @@
     #ypp-panel .ypp-danger { background: #cf222e; border-color: #cf222e; color: #fff; }
     #ypp-panel .ypp-x { padding: 0 6px; }
 
+    html.ypp-selecting .ypp-card { cursor: pointer; }
+    html.ypp-selecting .ypp-card > * { pointer-events: none; }
+    html.ypp-selecting .ypp-card.ypp-dim { opacity: 1; }
+    html.ypp-selecting .ypp-card::before { content: ''; position: absolute; left: 8px; top: 8px; z-index: 40; width: 22px; height: 22px; border-radius: 6px; border: 2px solid #fff; background: rgba(0,0,0,.45); box-shadow: 0 1px 4px #0006; }
+    html.ypp-selecting .ypp-card.ypp-selected { outline: 3px solid #cf222e; outline-offset: 2px; border-radius: 12px; }
+    html.ypp-selecting .ypp-card.ypp-selected::before { content: '✓'; background: #cf222e; color: #fff; font: 700 15px/18px Roboto, sans-serif; text-align: center; }
+    html.ypp-selecting .ypp-ui { display: none; }
+    #ypp-selbar { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 2147483003; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; max-width: calc(100vw - 32px); padding: 10px 14px; border-radius: 12px; background: #222; color: #fff; font: 13px/1.4 Roboto, system-ui, sans-serif; box-shadow: 0 8px 28px #0007; }
+    #ypp-selbar .ypp-selhint { opacity: .7; font-size: 12px; }
+    #ypp-selbar button { border: 1px solid #fff6; background: transparent; color: #fff; border-radius: 8px; padding: 5px 10px; cursor: pointer; font: inherit; font-size: 12px; }
+    #ypp-selbar button.ypp-danger { background: #cf222e; border-color: #cf222e; }
+    #ypp-selbar button:disabled { opacity: .45; cursor: default; }
     #ypp-toast { position: fixed; left: 50%; bottom: 28px; transform: translate(-50%, 20px); z-index: 2147483002; max-width: min(640px, calc(100vw - 32px)); padding: 10px 14px; border-radius: 10px; background: #222; color: #fff; font: 13px/1.45 Roboto, system-ui, sans-serif; opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; box-shadow: 0 6px 20px #0006; }
     #ypp-toast.show { opacity: 1; transform: translate(-50%, 0); }
     #ypp-toast[data-kind=ok] { background: #1f6f3a; }
@@ -1976,7 +2095,7 @@
     GM_registerMenuCommand('好みの設定を開く', () => openPanel('prefs'));
     GM_registerMenuCommand('今すぐ学習（高評価・再生リスト・登録）', () => { openPanel('learn'); learnAll(); });
     GM_registerMenuCommand('好み枠を今すぐ更新', () => refreshShelf(true));
-    GM_registerMenuCommand('薄い動画に一括「興味なし」', () => { openPanel('ops'); bulkNotInterested(); });
+    GM_registerMenuCommand('選んで「興味なし」を送る', () => startSelect());
   }
 
   new MutationObserver(scheduleScan).observe(document.documentElement, { childList: true, subtree: true });
