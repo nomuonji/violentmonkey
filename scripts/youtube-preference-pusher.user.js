@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Preference Pusher
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      1.0.0
+// @version      1.1.0
 // @description  YouTubeのおすすめを自分の好み（手動リスト＋高評価・再生リスト・登録チャンネルからの学習）で採点し、並べ替え・薄表示・好み枠の差し込み・ワンクリックの「興味なし」送信を行います。
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -27,7 +27,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.0.0';
+  const VERSION = '1.1.0';
   const NS = 'ypp';
 
   // ======================================================================
@@ -44,6 +44,7 @@
     boostAt: 1.5,          // これ以上は「好み」として強調・上へ
     dimAt: 0,              // これ以下は「好み要素なし」として薄く
     lowAction: 'dim',      // dim | hide | none
+    dimOpacity: 0.6,       // 薄く表示するときの不透明度（1で通常）
     showChips: 'marked',   // marked | all | none
     hideShorts: false,
     minViews: 0,
@@ -56,6 +57,8 @@
     shelfPerChannel: 2,
     shelfChannels: 20,
     shelfUseLearnedTerms: true,
+    shelfInterleave: true, // スクロールで読み込まれる塊ごとに好み枠のつづきを1行挟む
+    inlineCount: 6,
     learnMax: 1000,
     includeSubs: true,
     includeWatchLater: false,
@@ -616,6 +619,8 @@
   function pickShelf(candidates, ctx, opts) {
     const { watched = {}, dismissed = {} } = opts;
     const settings = ctx.settings;
+    const limit = opts.limit || settings.shelfCount;
+    const perChannel = opts.perChannel || settings.shelfPerChannel;
     const seen = new Set();
     const scored = [];
     for (const v of candidates) {
@@ -636,18 +641,34 @@
     for (const v of scored) {
       const k = v.channelId || norm(v.channelName);
       const n = per.get(k) || 0;
-      if (n >= settings.shelfPerChannel) continue;
+      if (n >= perChannel) continue;
       per.set(k, n + 1);
       out.push(v);
-      if (out.length >= settings.shelfCount) break;
+      if (out.length >= limit) break;
     }
+    return out;
+  }
+
+  // 候補プールから、まだ出していないものを n 本取る（1行の中では同じチャンネルを perChannel 本まで）
+  function takeFromPool(pool, n, shown, { watched = {}, dismissed = {}, perChannel = 2 } = {}) {
+    const out = [];
+    const per = new Map();
+    for (const v of pool || []) {
+      if (out.length >= n) break;
+      if (shown.has(v.videoId) || watched[v.videoId] || dismissed[v.videoId]) continue;
+      const k = v.channelId || norm(v.channelName);
+      if ((per.get(k) || 0) >= perChannel) continue;
+      per.set(k, (per.get(k) || 0) + 1);
+      out.push(v);
+    }
+    for (const v of out) shown.add(v.videoId);
     return out;
   }
 
   const core = {
     DEFAULT_SETTINGS, DEFAULT_MANUAL, norm, tokenize, parseViews, viewsFromParts, parseAgeDays, parseList, parseManual,
     parseChannelRef, matchChannel, emptyCorpus, addDoc, mergeCorpora, pruneCorpus, termWeights, buildModel,
-    scoreVideo, classify, extractYt, extractInitialData, parseRss, searchParams, pickShelf, resolveKey,
+    scoreVideo, classify, extractYt, extractInitialData, parseRss, searchParams, pickShelf, takeFromPool, resolveKey,
   };
 
   if (typeof module === 'object' && module.exports) {
@@ -682,7 +703,9 @@
     bg: store.get('bg', emptyCorpus()),
     ignore: store.get('ignore', { channels: [], terms: [] }),
     dismissed: store.get('dismissed', {}),
-    shelf: store.get('shelf', { at: 0, items: [], note: '' }),
+    shelf: store.get('shelf', { at: 0, items: [], pool: [], note: '' }),
+    topItems: null,
+    inline: { epoch: -1, shown: new Set(), rows: new Map() },
     resolved: store.get('resolved', {}),
     manual: null,
     model: null,
@@ -697,6 +720,7 @@
   };
 
   function rebuild() {
+    try { document.documentElement.style.setProperty('--ypp-dim-opacity', String(clamp(Number(state.settings.dimOpacity) || 0.6, 0.1, 1))); } catch (_) { /* noop */ }
     state.manual = parseManual(state.manualText);
     state.model = buildModel({
       learned: state.learned, fb: state.fb, watch: state.watch, bg: state.bg, ignore: state.ignore, settings: state.settings,
@@ -996,12 +1020,17 @@
         } catch (e) { errors.push(e.message); }
         await sleep(jitter(400, 800));
       }
-      const items = pickShelf(candidates, ctx(), { watched: state.watch.ids, dismissed: state.dismissed });
+      // 上位だけでなく候補全体を点数順に取っておき、上の枠とスクロール中の「つづき」で順に出す
+      const pool = pickShelf(candidates, ctx(), {
+        watched: state.watch.ids, dismissed: state.dismissed, limit: 300, perChannel: Math.max(4, s.shelfPerChannel * 3),
+      });
       state.shelf = {
         at: Date.now(),
-        items,
-        note: `取得元 ${fetched} 件 / 候補 ${candidates.length} 本` + (errors.length ? ` / 失敗 ${errors.length}` : ''),
+        items: pool.slice(0, s.shelfCount),
+        pool,
+        note: `取得元 ${fetched} 件 / 候補 ${candidates.length} 本 → 好み ${pool.length} 本` + (errors.length ? ` / 失敗 ${errors.length}` : ''),
       };
+      resetShelfPicks(false);
       store.set('shelf', state.shelf);
       if (!chanIds.size && !queries.length) state.shelf.note = '好きなチャンネル・キーワードを設定するか、学習を実行すると表示されます';
     } catch (e) {
@@ -1047,14 +1076,14 @@
     clear(shelfEl);
     const sh = state.shelf;
     const ageNow = sh.at ? (Date.now() - sh.at) / 86400000 : null;
-    const items = (sh.items || []).filter((v) => !state.dismissed[v.videoId] && !state.watch.ids[v.videoId]);
+    const items = topShelfItems();
     shelfEl.append(
       h('div', { class: 'ypp-shelf-head' },
         h('span', { class: 'ypp-shelf-title' }, '🎯 あなたの好み枠'),
         h('span', { class: 'ypp-shelf-note' }, state.shelfBusy ? '更新中…' : [sh.at ? `${ago(ageNow)}に更新` : '', sh.note].filter(Boolean).join(' · ')),
         h('button', { class: 'ypp-mini', onclick: () => refreshShelf(true), disabled: state.shelfBusy }, '更新'),
         h('button', { class: 'ypp-mini', onclick: () => openPanel('prefs') }, '設定'),
-        h('button', { class: 'ypp-mini', title: '好み枠を隠す（設定でいつでも戻せます）', onclick: () => { state.settings.shelf = false; saveSettings(); ensureShelf(); } }, '✕'),
+        h('button', { class: 'ypp-mini', title: '好み枠を隠す（設定でいつでも戻せます）', onclick: () => { state.settings.shelf = false; saveSettings(); resetShelfPicks(true); ensureShelf(); } }, '✕'),
       ),
     );
     if (!items.length) {
@@ -1062,25 +1091,104 @@
       return;
     }
     const row = h('div', { class: 'ypp-shelf-row' });
-    for (const v of items) {
-      const href = v.isShort ? `/shorts/${v.videoId}` : `/watch?v=${v.videoId}`;
-      row.append(
-        h('div', { class: 'ypp-sc' },
-          h('a', { class: 'ypp-sc-thumb', href, title: v.reasons.join('\n') },
-            h('img', { src: `https://i.ytimg.com/vi/${v.videoId}/mqdefault.jpg`, loading: 'lazy', alt: '' }),
-            h('span', { class: 'ypp-sc-score' }, '★ ' + v.score.toFixed(1)),
-          ),
-          h('button', {
-            class: 'ypp-sc-x', title: 'この動画を好み枠から外す',
-            onclick: (ev) => { ev.preventDefault(); state.dismissed[v.videoId] = Date.now(); trimMap(state.dismissed, 3000); store.set('dismissed', state.dismissed); renderShelf(); },
-          }, '✕'),
-          h('a', { class: 'ypp-sc-title', href, title: v.title }, v.title),
-          h('div', { class: 'ypp-sc-meta' }, [v.channelName, fmtViews(v.views), ago(v.ageDays)].filter(Boolean).join(' · ')),
-          h('div', { class: 'ypp-sc-why' }, v.reasons[0] || ''),
-        ),
-      );
-    }
+    for (const v of items) row.append(shelfCard(v));
     shelfEl.append(row);
+  }
+
+  function dismissVideo(videoId) {
+    state.dismissed[videoId] = Date.now();
+    trimMap(state.dismissed, 3000);
+    store.set('dismissed', state.dismissed);
+  }
+
+  function shelfCard(v) {
+    const href = v.isShort ? `/shorts/${v.videoId}` : `/watch?v=${v.videoId}`;
+    const card = h('div', { class: 'ypp-sc' });
+    card.append(
+      h('a', { class: 'ypp-sc-thumb', href, title: (v.reasons || []).join('\n') },
+        h('img', { src: `https://i.ytimg.com/vi/${v.videoId}/mqdefault.jpg`, loading: 'lazy', alt: '' }),
+        h('span', { class: 'ypp-sc-score' }, '★ ' + Number(v.score || 0).toFixed(1)),
+      ),
+      h('button', {
+        class: 'ypp-sc-x', title: 'この動画を好み枠から外す',
+        onclick: (ev) => { ev.preventDefault(); ev.stopPropagation(); dismissVideo(v.videoId); card.remove(); },
+      }, '✕'),
+      h('a', { class: 'ypp-sc-title', href, title: v.title }, v.title),
+      h('div', { class: 'ypp-sc-meta' }, [v.channelName, fmtViews(v.views), ago(v.ageDays)].filter(Boolean).join(' · ')),
+      h('div', { class: 'ypp-sc-why' }, (v.reasons || [])[0] || ''),
+    );
+    return card;
+  }
+
+  function shelfPool() {
+    const sh = state.shelf;
+    return (sh.pool && sh.pool.length ? sh.pool : sh.items) || [];
+  }
+
+  function syncInlineEpoch() {
+    if (state.inline.epoch === state.epoch) return;
+    for (const el of document.querySelectorAll('.ypp-inline')) el.remove();
+    state.inline = { epoch: state.epoch, shown: new Set(), rows: new Map() };
+    state.topItems = null;
+  }
+
+  // 上の枠に出す分（ページを開くたびにプールの先頭から）
+  function topShelfItems() {
+    syncInlineEpoch();
+    if (!state.topItems) {
+      state.topItems = takeFromPool(shelfPool(), state.settings.shelfCount, state.inline.shown, {
+        watched: state.watch.ids, dismissed: state.dismissed, perChannel: state.settings.shelfPerChannel,
+      });
+    }
+    return state.topItems.filter((v) => !state.dismissed[v.videoId]);
+  }
+
+  // プール更新後：上の枠を選び直し、まだ中身のない「つづき」行は次回の走査で埋め直す
+  function resetShelfPicks(clearRows) {
+    syncInlineEpoch();
+    const keep = new Set();
+    for (const [k, el] of state.inline.rows) {
+      if (!el || clearRows) { if (el) el.remove(); state.inline.rows.delete(k); continue; }
+      for (const a of el.querySelectorAll('.ypp-sc-title')) {
+        const m = (a.getAttribute('href') || '').match(/(?:v=|shorts\/)([\w-]{11})/);
+        if (m) keep.add(m[1]);
+      }
+    }
+    state.inline.shown = keep;
+    state.topItems = null;
+  }
+
+  // スクロールで読み込まれた塊ごとに「好み枠のつづき」を1行挟む
+  function ensureInlineRows(parent, batches, ordered) {
+    syncInlineEpoch();
+    if (!state.settings.shelf || !state.settings.shelfInterleave || !batches.length) return;
+    topShelfItems(); // 上の枠の分を先に確保して重複を避ける
+    const sorted = [...batches].sort((a, b) => a.b - b.b);
+    for (const bt of sorted.slice(1)) {
+      const key = bt.b;
+      let el = state.inline.rows.get(key);
+      if (el === undefined) {
+        const items = takeFromPool(shelfPool(), state.settings.inlineCount, state.inline.shown, {
+          watched: state.watch.ids, dismissed: state.dismissed, perChannel: state.settings.shelfPerChannel,
+        });
+        if (!items.length) { state.inline.rows.set(key, null); continue; }
+        const row = h('div', { class: 'ypp-shelf-row' });
+        for (const v of items) row.append(shelfCard(v));
+        el = h('div', { class: 'ypp-inline' },
+          h('div', { class: 'ypp-shelf-head' },
+            h('span', { class: 'ypp-shelf-title' }, '🎯 好み枠のつづき'),
+            h('span', { class: 'ypp-shelf-note' }, 'スクロールで読み込まれた分ごとに挟んでいます'),
+            h('button', { class: 'ypp-mini', title: 'つづきを挟むのをやめる（設定で戻せます）', onclick: () => { state.settings.shelfInterleave = false; saveSettings(); resetShelfPicks(true); } }, '✕')),
+          row);
+        state.inline.rows.set(key, el);
+        const cont = parent.querySelector(':scope > ytd-continuation-item-renderer');
+        parent.insertBefore(el, cont || null);
+      }
+      if (!el) continue;
+      if (el.parentNode !== parent) parent.insertBefore(el, parent.querySelector(':scope > ytd-continuation-item-renderer'));
+      // 並べ替えが有効なら「良い動画」と「薄い動画」の間に置く
+      el.style.order = ordered ? String(bt.base + bt.good * 2 - 1) : '';
+    }
   }
 
   function trimMap(map, max) {
@@ -1239,9 +1347,10 @@
   const batchOf = new Map();
   let batchCounter = 0;
 
-  function reorder(groups, surface) {
+  function reorder(groups, surface, apply = true) {
+    const result = new Map();
     for (const [parent, cards] of groups) {
-      if (surface === 'watch') {
+      if (apply && surface === 'watch') {
         const d = getComputedStyle(parent).display;
         if (!/flex|grid/.test(d)) parent.classList.add('ypp-flexcol');
       }
@@ -1261,18 +1370,25 @@
         byBatch.get(c.batch).push(c);
       }
       const minBatch = Math.min(...byBatch.keys());
+      const batches = [];
       for (const [b, list] of byBatch) {
+        const base = (b - minBatch + 1) * 1000;
         const sorted = list.map((c, i) => ({ c, i })).sort((x, y) => (y.c.rank - x.c.rank) || (x.i - y.i));
-        sorted.forEach(({ c }, rank) => { c.el.style.order = String((b - minBatch + 1) * 1000 + rank); });
+        if (apply) sorted.forEach(({ c }, rank) => { c.el.style.order = String(base + rank * 2); });
+        batches.push({ b, base, good: list.filter((c) => c.cls === 'boost' || c.cls === 'neutral').length });
       }
+      result.set(parent, batches);
+      if (!apply) continue;
       // 動画以外の子要素（棚・続きの読み込み）は、位置を保つ
       let lastOrder = 0;
       for (const child of parent.children) {
+        if (child.classList.contains('ypp-inline')) continue;
         if (child.classList.contains('ypp-card') && child.style.order) { lastOrder = Number(child.style.order); continue; }
         if (/continuation/i.test(child.tagName)) child.style.order = '99999999';
         else child.style.order = String(Math.floor(lastOrder / 1000) * 1000 + 999);
       }
     }
+    return result;
   }
 
   let scanTimer = 0; let scanFirst = 0;
@@ -1304,19 +1420,23 @@
       let cls = classify(r, state.settings);
       if (surface === 'search' && cls === 'dim') cls = 'neutral'; // 検索は自分で探しているので薄くしない
       decorate(el, info, r, cls);
-      if (reorderOn && !el.closest('ytd-rich-section-renderer')) {
+      if ((reorderOn || surface === 'home') && !el.closest('ytd-rich-section-renderer')) {
         const parent = el.parentElement;
         if (!groups.has(parent)) groups.set(parent, []);
-        groups.get(parent).push({ el, info, rank: cls === 'hidden' ? -100 : r.score });
+        groups.get(parent).push({ el, info, cls, rank: cls === 'hidden' ? -100 : r.score });
       }
     }
-    if (reorderOn) {
-      reorder(groups, surface);
-    } else {
+    if (!reorderOn) {
       const parents = new Set([...document.querySelectorAll('.ypp-card')].map((el) => el.parentElement).filter(Boolean));
       for (const p of parents) for (const c of p.children) if (c.style.order) c.style.order = '';
     }
-    if (surface === 'home') ensureShelf();
+    const batchInfo = groups.size ? reorder(groups, surface, reorderOn) : new Map();
+    if (surface === 'home') {
+      ensureShelf();
+      for (const [parent, batches] of batchInfo) {
+        if (parent.matches('ytd-rich-grid-renderer > #contents')) ensureInlineRows(parent, batches, reorderOn);
+      }
+    }
   }
 
   function rescoreAll() {
@@ -1680,6 +1800,7 @@
         field('このスコア以上は「好み」として強調', numInput('boostAt', 0.5, -10)),
         field('このスコア以下は「好み要素なし」', numInput('dimAt', 0.5, -10), '0 にすると、好みの手がかりが1つもない動画が対象になります'),
         field('「好み要素なし」の扱い', selectInput('lowAction', [['dim', '薄く表示'], ['hide', '隠す'], ['none', '何もしない']])),
+        field('薄く表示するときの濃さ（0.1〜1、1で通常表示）', numInput('dimOpacity', 0.05, 0.1)),
         field('スコア表示', selectInput('showChips', [['marked', '強調・薄表示の動画だけ'], ['all', 'すべて'], ['none', '表示しない']]))),
       h('div', { class: 'ypp-box' },
         h('div', { class: 'ypp-label' }, 'フィルタ'),
@@ -1695,7 +1816,9 @@
         field('キーワード検索の期間', selectInput('shelfPeriod', [['week', '今週'], ['month', '今月']])),
         field('1チャンネルあたりの最大本数', numInput('shelfPerChannel', 1, 1)),
         field('新着を見るチャンネル数', numInput('shelfChannels', 1, 0)),
-        checkInput('shelfUseLearnedTerms', '学習した語でも検索する')),
+        checkInput('shelfUseLearnedTerms', '学習した語でも検索する'),
+        checkInput('shelfInterleave', 'スクロールで読み込まれる分ごとに「好み枠のつづき」を1行挟む', () => resetShelfPicks(true)),
+        field('↑ 1行あたりの本数', numInput('inlineCount', 1, 2))),
     );
   }
 
@@ -1704,7 +1827,7 @@
     body.append(
       h('div', { class: 'ypp-box' },
         h('div', { class: 'ypp-label' }, '一括「興味なし」'),
-        h('p', { class: 'ypp-help' }, 'いま画面に読み込まれている「薄く表示」の動画に、YouTubeの「興味なし」を1本ずつ送ります。押したときだけ動き、間隔をあけて順番に処理します。もう一度押すと止まります。'),
+        h('p', { class: 'ypp-help' }, 'このページでここまでに読み込まれた「薄く表示」の動画すべて（スクロールで通り過ぎた分も含む。まだ読み込まれていない分と、隠した動画は対象外）に、YouTubeの「興味なし」を1本ずつ送ります。押したときだけ動き、間隔をあけて順番に処理します。もう一度押すと止まります。'),
         h('div', { class: 'ypp-row' },
           h('button', { class: state.bulkBusy ? '' : 'ypp-danger', onclick: bulkNotInterested }, state.bulkBusy ? '停止する' : `薄い動画 ${dimCount} 件に「興味なし」を送る`),
           h('span', { id: 'ypp-bulk-status', class: 'ypp-status' }, bulkStatusText))),
@@ -1768,7 +1891,7 @@
   addStyle(`
     .ypp-card { position: relative; }
     .ypp-card.ypp-hidden { display: none !important; }
-    .ypp-card.ypp-dim { opacity: .38; transition: opacity .15s; }
+    .ypp-card.ypp-dim { opacity: var(--ypp-dim-opacity, .6); transition: opacity .15s; }
     .ypp-card.ypp-dim:hover { opacity: 1; }
     .ypp-card.ypp-boost { outline: 2px solid rgba(46, 160, 67, .55); outline-offset: 2px; border-radius: 12px; }
     .ypp-flexcol { display: flex !important; flex-direction: column !important; }
@@ -1787,6 +1910,9 @@
     .ypp-shelf-title { font-size: 16px; font-weight: 700; }
     .ypp-shelf-note { font-size: 12px; opacity: .7; flex: 1; }
     .ypp-shelf-empty { font-size: 13px; opacity: .75; padding: 6px 0; }
+    .ypp-inline { flex: 0 0 calc(100% - 16px); width: calc(100% - 16px); box-sizing: border-box; margin: 4px 8px 28px; padding: 10px 14px 12px; border-radius: 14px; background: var(--yt-spec-badge-chip-background, rgba(0,0,0,.05)); color: var(--yt-spec-text-primary, #0f0f0f); font-family: Roboto, system-ui, sans-serif; }
+    .ypp-inline .ypp-shelf-title { font-size: 14px; }
+    .ypp-inline button { border: 1px solid #8886; background: transparent; color: inherit; border-radius: 8px; padding: 3px 8px; cursor: pointer; font-size: 12px; }
     .ypp-shelf-row { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 6px; scrollbar-width: thin; }
     .ypp-sc { position: relative; flex: 0 0 220px; min-width: 0; }
     .ypp-sc-thumb { position: relative; display: block; border-radius: 10px; overflow: hidden; aspect-ratio: 16 / 9; background: #0003; }
