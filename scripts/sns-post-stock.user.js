@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         SNS Post Stock (X / Threads)
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      1.0.0
-// @description  One tap on 📌 saves an X / Threads post (text, author, metrics, media, links) to a Google Spreadsheet for later analysis.
+// @version      1.1.0
+// @description  One tap on 📌 saves (hover / long-press for tags) an X / Threads post (text, author, metrics, media, links) to a Google Spreadsheet for later analysis.
 // @author       nomuonji
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -31,7 +31,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.0.0';
+  const VERSION = '1.1.0';
   const URL_KEY = 'webAppUrl';
   const SAVED_KEY = 'savedKeys';
   const MAX_SAVED_KEYS = 5000;
@@ -353,22 +353,118 @@
     placeButton(row, () => thExtract(container), m ? 'threads:' + m[1] : '');
   }
 
+  // ---- Tags (local cache) ------------------------------------------------
+  const POST_TAGS_KEY = 'postTags';   // { "x:123": ["tag", …] } for saved posts
+  const TAG_LIST_KEY = 'tagList';     // [{ name, count }] from the sheet
+  const RECENT_TAGS_KEY = 'recentTags';
+  const TAG_LIST_TTL = 10 * 60 * 1000;
+  const MAX_CHIPS = 16;
+
+  const postTags = GM_getValue(POST_TAGS_KEY, {}) || {};
+  let tagList = GM_getValue(TAG_LIST_KEY, []) || [];
+  let recentTags = GM_getValue(RECENT_TAGS_KEY, []) || [];
+  let tagListFetchedAt = 0;
+
+  function cleanTag(tag) {
+    return String(tag || '').replace(/[,、，\n\r\t]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
+  }
+
+  function setPostTags(key, tags) {
+    if (!key) return;
+    postTags[key] = tags;
+    for (const k of Object.keys(postTags)) if (!savedKeys.has(k)) delete postTags[k];
+    GM_setValue(POST_TAGS_KEY, postTags);
+    for (const t of tags) {
+      if (!tagList.some(x => x.name.toLowerCase() === t.toLowerCase())) tagList.push({ name: t, count: 1 });
+    }
+    GM_setValue(TAG_LIST_KEY, tagList);
+  }
+
+  function useTag(tag) {
+    recentTags = [tag, ...recentTags.filter(t => t.toLowerCase() !== tag.toLowerCase())].slice(0, 30);
+    GM_setValue(RECENT_TAGS_KEY, recentTags);
+  }
+
+  async function refreshTagList(force) {
+    const url = getWebAppUrl();
+    if (!url || (!force && Date.now() - tagListFetchedAt < TAG_LIST_TTL)) return;
+    tagListFetchedAt = Date.now();
+    try {
+      const result = await postJson(url, { action: 'tags' });
+      if (result?.ok && Array.isArray(result.tags)) {
+        tagList = result.tags;
+        GM_setValue(TAG_LIST_KEY, tagList);
+        if (panel.btn) renderPanel();
+      }
+    } catch (error) {
+      console.warn('[SNS Post Stock] tag list failed:', error);
+    }
+  }
+
+  // Recently used first, then the most used ones in the sheet.
+  function candidateTags(filter) {
+    const seen = new Set();
+    const out = [];
+    const push = name => {
+      const k = name.toLowerCase();
+      if (seen.has(k)) return;
+      if (filter && !k.includes(filter.toLowerCase())) return;
+      seen.add(k);
+      out.push(name);
+    };
+    recentTags.forEach(push);
+    tagList.forEach(t => push(t.name));
+    return out;
+  }
+
   // ---- UI ----------------------------------------------------------------
+  const PANEL_ID = 'sps-panel';
   const style = document.createElement('style');
   style.textContent = `
     .${BTN_CLASS}{display:inline-flex;align-items:center;justify-content:center;
       min-width:34px;height:34px;margin-left:4px;padding:0 6px;border:0;border-radius:999px;
       background:transparent;cursor:pointer;font:600 15px/1 system-ui,sans-serif;
-      color:inherit;opacity:.7;-webkit-tap-highlight-color:transparent;flex:0 0 auto}
+      color:inherit;opacity:.7;-webkit-tap-highlight-color:transparent;flex:0 0 auto;
+      user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;touch-action:manipulation}
     .${BTN_CLASS}:hover{opacity:1;background:rgba(29,155,240,.12)}
     .${BTN_CLASS}[data-state="saved"]{opacity:1;color:rgb(0,186,124)}
-    .${BTN_CLASS}[data-state="busy"]{opacity:.4;pointer-events:none}`;
+    .${BTN_CLASS}[data-state="busy"]{opacity:.4}
+    .${BTN_CLASS} .sps-n{font-size:11px;margin-left:2px}
+    #${PANEL_ID}{position:fixed;z-index:2147483646;width:min(300px,92vw);box-sizing:border-box;
+      padding:8px;border-radius:10px;background:rgba(30,30,36,.97);color:#fff;
+      box-shadow:0 4px 18px rgba(0,0,0,.45);font:500 13px/1.3 system-ui,sans-serif}
+    #${PANEL_ID} .sps-head{display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:12px;opacity:.8}
+    #${PANEL_ID} .sps-head span{flex:1}
+    #${PANEL_ID} .sps-chips{display:flex;flex-wrap:wrap;gap:6px;max-height:132px;overflow:auto}
+    #${PANEL_ID} .sps-chip{border:1px solid rgba(255,255,255,.28);background:transparent;color:#fff;
+      border-radius:999px;padding:5px 10px;font:inherit;cursor:pointer;-webkit-tap-highlight-color:transparent}
+    #${PANEL_ID} .sps-chip:hover{background:rgba(255,255,255,.12)}
+    #${PANEL_ID} .sps-chip[data-on="1"]{background:rgb(0,186,124);border-color:rgb(0,186,124)}
+    #${PANEL_ID} .sps-chip.sps-new{border-style:dashed}
+    #${PANEL_ID} input{width:100%;box-sizing:border-box;margin-top:7px;padding:6px 8px;border-radius:6px;
+      border:1px solid rgba(255,255,255,.25);background:rgba(255,255,255,.08);color:#fff;font:inherit;outline:none}
+    #${PANEL_ID} .sps-empty{opacity:.6;font-size:12px}`;
   document.documentElement.appendChild(style);
 
   function setState(btn, state) {
     btn.dataset.state = state;
+    const n = (postTags[btn.dataset.key] || []).length;
     btn.textContent = state === 'saved' ? '✓' : state === 'busy' ? '…' : '📌';
-    btn.title = state === 'saved' ? '保存済み（もう一度押すと数値を更新）' : '投稿を保存';
+    if (state === 'saved' && n) {
+      const badge = document.createElement('span');
+      badge.className = 'sps-n';
+      badge.textContent = '#' + n;
+      btn.appendChild(badge);
+    }
+    btn.title = state === 'saved'
+      ? '保存済み' + (n ? '（' + postTags[btn.dataset.key].join(', ') + '）' : '') + ' — 押すと数値を更新 / ホバーでタグ'
+      : '投稿を保存（ホバー・長押しでタグを付けて保存）';
+  }
+
+  function refreshButtons(key) {
+    document.querySelectorAll('.' + BTN_CLASS).forEach(b => {
+      if (b.dataset.key === key && b.dataset.state !== 'busy') setState(b, savedKeys.has(key) ? 'saved' : 'idle');
+    });
   }
 
   // Add the button once per action row; refresh it if the site reused the row
@@ -380,11 +476,18 @@
       if (existing.dataset.key !== key && existing.dataset.state !== 'busy') {
         existing.dataset.key = key;
         setState(existing, key && savedKeys.has(key) ? 'saved' : 'idle');
+        if (panel.btn === existing) closePanel();
       }
       return;
     }
     row.appendChild(makeButton(extract, key));
   }
+
+  const HOVER_OPEN_MS = 350;
+  const HOVER_CLOSE_MS = 350;
+  const LONG_PRESS_MS = 450;
+  const AUTO_CLOSE_MS = 5000;
+  const panel = { el: null, btn: null, parts: null, openTimer: 0, closeTimer: 0, autoTimer: 0, touched: false };
 
   function makeButton(extract, key) {
     const btn = document.createElement('button');
@@ -394,17 +497,205 @@
     btn.className = BTN_CLASS;
     btn.setAttribute('aria-label', '投稿を保存');
     setState(btn, key && savedKeys.has(key) ? 'saved' : 'idle');
+
+    let pressTimer = 0;
+    let longPressed = false;
     // Stop the tap from opening the post.
     for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'touchstart', 'touchend']) {
       btn.addEventListener(type, e => e.stopPropagation());
     }
+    btn.addEventListener('contextmenu', e => { e.preventDefault(); e.stopPropagation(); });
+    btn.addEventListener('pointerdown', e => {
+      longPressed = false;
+      if (e.pointerType === 'mouse') return;
+      clearTimeout(pressTimer);
+      pressTimer = setTimeout(() => { longPressed = true; openPanel(btn, false); }, LONG_PRESS_MS);
+    });
+    for (const type of ['pointerup', 'pointercancel', 'pointerleave']) {
+      btn.addEventListener(type, () => clearTimeout(pressTimer));
+    }
+    btn.addEventListener('pointerenter', e => {
+      if (e.pointerType !== 'mouse') return;
+      clearTimeout(panel.closeTimer);
+      clearTimeout(panel.openTimer);
+      panel.openTimer = setTimeout(() => openPanel(btn, false), HOVER_OPEN_MS);
+    });
+    btn.addEventListener('pointerleave', e => {
+      if (e.pointerType !== 'mouse') return;
+      clearTimeout(panel.openTimer);
+      scheduleClose();
+    });
     btn.addEventListener('click', event => {
       event.preventDefault();
       event.stopPropagation();
-      void save(btn, btn._extract);
+      if (longPressed) { longPressed = false; return; } // the long press opened the panel
+      const touch = event.pointerType ? event.pointerType !== 'mouse' : matchMedia('(hover: none)').matches;
+      void run(btn, { save: true }).then(ok => {
+        // No hover on touch screens: offer the tags right after a tap-save.
+        if (ok && touch) openPanel(btn, true);
+      });
     });
     return btn;
   }
+
+  function scheduleClose() {
+    clearTimeout(panel.closeTimer);
+    panel.closeTimer = setTimeout(() => {
+      const input = panel.el && panel.el.querySelector('input');
+      if (input && document.activeElement === input && input.value) return;
+      closePanel();
+    }, HOVER_CLOSE_MS);
+  }
+
+  function closePanel() {
+    clearTimeout(panel.closeTimer);
+    clearTimeout(panel.autoTimer);
+    if (panel.el) panel.el.remove();
+    panel.el = null;
+    panel.btn = null;
+    panel.parts = null;
+  }
+
+  function openPanel(btn, auto) {
+    if (!btn.isConnected) return;
+    if (panel.btn !== btn) closePanel();
+    panel.btn = btn;
+    panel.touched = false;
+    if (!panel.el) {
+      const el = document.createElement('div');
+      el.id = PANEL_ID;
+      for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click', 'touchstart', 'touchend']) {
+        el.addEventListener(type, e => {
+          e.stopPropagation();
+          panel.touched = true;
+          clearTimeout(panel.autoTimer);
+        });
+      }
+      el.addEventListener('pointerenter', () => clearTimeout(panel.closeTimer));
+      el.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse') scheduleClose(); });
+      buildPanel(el);
+      document.documentElement.appendChild(el);
+      panel.el = el;
+    }
+    renderPanel();
+    positionPanel();
+    clearTimeout(panel.autoTimer);
+    if (auto) panel.autoTimer = setTimeout(() => { if (!panel.touched) closePanel(); }, AUTO_CLOSE_MS);
+    void refreshTagList(false);
+  }
+
+  function positionPanel() {
+    if (!panel.el || !panel.btn) return;
+    const r = panel.btn.getBoundingClientRect();
+    const w = panel.el.offsetWidth;
+    const h = panel.el.offsetHeight;
+    const left = Math.min(Math.max(8, r.right - w), window.innerWidth - w - 8);
+    const top = r.top - h - 6 >= 8 ? r.top - h - 6 : Math.min(r.bottom + 6, window.innerHeight - h - 8);
+    panel.el.style.left = left + 'px';
+    panel.el.style.top = top + 'px';
+  }
+
+  function buildPanel(el) {
+    const head = document.createElement('div');
+    head.className = 'sps-head';
+    const title = document.createElement('span');
+    head.appendChild(title);
+    const chips = document.createElement('div');
+    chips.className = 'sps-chips';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = '絞り込み / 新しいタグ（Enterで追加）';
+    input.enterKeyHint = 'done';
+    input.addEventListener('keydown', e => {
+      e.stopPropagation(); // keep X / Threads shortcuts (j, k, l …) out of the way
+      if (e.key === 'Escape') { closePanel(); return; }
+      if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229) return;
+      e.preventDefault();
+      const tag = cleanTag(input.value);
+      if (!tag || !panel.btn) return;
+      const on = (postTags[panel.btn.dataset.key] || []).some(t => t.toLowerCase() === tag.toLowerCase());
+      input.value = '';
+      toggleTag(panel.btn, tag, on);
+    });
+    for (const type of ['keyup', 'keypress']) input.addEventListener(type, e => e.stopPropagation());
+    input.addEventListener('input', () => { renderPanel(); positionPanel(); });
+    el.append(head, chips, input);
+    panel.parts = { title, chips, input };
+  }
+
+  // Only the title and chips are redrawn, so typing (and IME) is never interrupted.
+  function renderPanel() {
+    const btn = panel.btn;
+    if (!panel.el || !btn || !panel.parts) return;
+    const { title, chips, input } = panel.parts;
+    const key = btn.dataset.key;
+    const saved = savedKeys.has(key);
+    const current = postTags[key] || [];
+    const filter = input.value.trim().toLowerCase();
+
+    title.textContent = btn.dataset.state === 'busy' ? '保存中…'
+      : saved ? '保存済み · タップでタグ切替' : 'タグを選ぶとそのまま保存';
+    chips.textContent = '';
+    const names = [...current, ...candidateTags('')]
+      .filter((t, i, a) => a.findIndex(x => x.toLowerCase() === t.toLowerCase()) === i)
+      .filter(t => !filter || t.toLowerCase().includes(filter))
+      .slice(0, MAX_CHIPS);
+    for (const name of names) {
+      const on = current.some(t => t.toLowerCase() === name.toLowerCase());
+      chips.appendChild(chip(name, on, () => toggleTag(btn, name, on)));
+    }
+    const typed = cleanTag(input.value);
+    if (typed && !names.some(t => t.toLowerCase() === typed.toLowerCase())) {
+      const c = chip('＋ ' + typed, false, () => { input.value = ''; toggleTag(btn, typed, false); });
+      c.classList.add('sps-new');
+      chips.appendChild(c);
+    }
+    if (!chips.childElementCount) {
+      const empty = document.createElement('div');
+      empty.className = 'sps-empty';
+      empty.textContent = 'まだタグがありません。下に入力して追加';
+      chips.appendChild(empty);
+    }
+  }
+
+  function chip(label, on, onTap) {
+    const c = document.createElement('button');
+    c.type = 'button';
+    c.className = 'sps-chip';
+    c.dataset.on = on ? '1' : '0';
+    c.textContent = label;
+    c.addEventListener('click', e => { e.preventDefault(); onTap(); });
+    return c;
+  }
+
+  function toggleTag(btn, tag, on) {
+    useTag(tag);
+    const key = btn.dataset.key;
+    if (btn.dataset.state === 'busy' && !savedKeys.has(key)) {
+      // A tap-save is still in flight: tag it once that has finished.
+      void run(btn, { addTags: [tag] });
+    } else if (!savedKeys.has(key)) {
+      void run(btn, { save: true, addTags: [tag] });
+    } else {
+      // Optimistic update; the server's answer replaces it (or it is rolled back).
+      const prev = postTags[key] || [];
+      setPostTags(key, on ? prev.filter(t => t.toLowerCase() !== tag.toLowerCase()) : [...prev, tag]);
+      refreshButtons(key);
+      void run(btn, on ? { removeTags: [tag], prev } : { addTags: [tag], prev });
+    }
+    renderPanel();
+    positionPanel();
+  }
+
+  window.addEventListener('scroll', e => {
+    if (!panel.el || panel.el.contains(e.target)) return;
+    const input = panel.el.querySelector('input');
+    if (input && document.activeElement === input) positionPanel();
+    else closePanel();
+  }, { passive: true, capture: true });
+  document.addEventListener('pointerdown', e => {
+    if (panel.el && !panel.el.contains(e.target) && !(panel.btn && panel.btn.contains(e.target))) closePanel();
+  }, true);
 
   let toastTimer = 0;
   function toast(message, kind = 'info') {
@@ -429,43 +720,85 @@
   }
 
   // ---- Save --------------------------------------------------------------
-  async function save(btn, extract) {
+  // Operations on one button run one after another (tap, then tag chips…).
+  function run(btn, op) {
+    const next = (btn._chain || Promise.resolve()).then(() => (op.save ? save(btn, op) : retag(btn, op)));
+    btn._chain = next.catch(() => {});
+    return next;
+  }
+
+  async function save(btn, { addTags = [] } = {}) {
     let url = getWebAppUrl();
     if (!url) {
-      if (!promptWebAppUrl()) return;
+      if (!promptWebAppUrl()) return false;
       url = getWebAppUrl();
     }
     let post;
     try {
-      post = extract();
+      post = btn._extract();
     } catch (error) {
       console.warn('[SNS Post Stock] extract failed:', error);
     }
     if (!post) {
       toast('投稿の情報を読み取れませんでした', 'error');
-      return;
+      return false;
     }
     post.savedFrom = location.href;
     post.clientSavedAt = new Date().toISOString();
     post.scriptVersion = VERSION;
     post.userAgent = navigator.userAgent;
+    if (addTags.length) post.addTags = addTags;
 
     const before = btn.dataset.state;
     setState(btn, 'busy');
+    if (panel.btn === btn) renderPanel();
     try {
       const result = await postJson(url, post);
       if (!result?.ok) throw new Error(result?.error || 'unknown error');
       const key = post.platform + ':' + post.postId;
       markSaved(key);
       btn.dataset.key = key;
-      document.querySelectorAll('.' + BTN_CLASS).forEach(b => { if (b === btn || b.dataset.key === key) setState(b, 'saved'); });
+      if (Array.isArray(result.tags)) setPostTags(key, result.tags);
+      setState(btn, 'saved');
+      refreshButtons(key);
+      if (panel.btn === btn) { renderPanel(); positionPanel(); }
+      const tagText = addTags.length ? ' #' + addTags.join(' #') : '';
       toast(result.duplicate
-        ? '更新しました（' + result.count + '回目）' + (post.truncated ? ' ※本文は省略表示' : '')
-        : '保存しました: ' + post.author.handle + (post.truncated ? '（本文は省略表示。詳細画面で保存すると全文）' : ''));
+        ? '更新しました（' + result.count + '回目）' + tagText + (post.truncated ? ' ※本文は省略表示' : '')
+        : '保存しました: ' + post.author.handle + tagText + (post.truncated ? '（本文は省略表示。詳細画面で保存すると全文）' : ''));
+      return true;
     } catch (error) {
       console.warn('[SNS Post Stock] save failed:', error);
       setState(btn, before === 'saved' ? 'saved' : 'idle');
+      if (panel.btn === btn) renderPanel();
       toast('保存できませんでした（' + error.message + '）', 'error');
+      return false;
+    }
+  }
+
+  async function retag(btn, { addTags = [], removeTags = [], prev = null }) {
+    const url = getWebAppUrl();
+    const [platform, ...rest] = (btn.dataset.key || '').split(':');
+    const postId = rest.join(':');
+    if (!url || !postId) return false;
+    try {
+      const result = await postJson(url, { action: 'tag', platform, postId, addTags, removeTags });
+      if (!result?.ok) throw new Error(result?.error || 'unknown error');
+      setPostTags(btn.dataset.key, result.tags || []);
+      refreshButtons(btn.dataset.key);
+      if (panel.btn === btn) { renderPanel(); positionPanel(); }
+      toast(addTags.length ? 'タグを追加: #' + addTags.join(' #') : 'タグを外しました: #' + removeTags.join(' #'));
+      return true;
+    } catch (error) {
+      console.warn('[SNS Post Stock] tag failed:', error);
+      if (prev) {
+        setPostTags(btn.dataset.key, prev);
+        refreshButtons(btn.dataset.key);
+        if (panel.btn === btn) renderPanel();
+      }
+      toast('タグを更新できませんでした（' + error.message + '）', 'error');
+      void refreshTagList(true);
+      return false;
     }
   }
 
