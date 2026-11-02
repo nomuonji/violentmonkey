@@ -58,6 +58,32 @@ Language Reactorの字幕で、覚えたい英単語を **Alt+クリック**（M
 
 - **注意**: ウェブアプリURLはViolentmonkeyのスクリプト用ストレージにだけ保存し、このリポジトリには入れません。URLを知っている人はシートに行を追加できてしまうので、URLは共有しないでください。`Code.gs` を変更したときは「デプロイを管理」から同じデプロイの新バージョンを作るとURLが変わりません。Netflixでは未確認です。
 
+### SNS Post Stock（X / Threads 投稿ストック）
+
+X と Threads の各投稿のアクション行に **📌** ボタンを追加し、ワンタップでGoogleスプレッドシートに投稿を保存します。保存したデータは、エージェントが後で分析できるよう構造化JSONでも格納します。
+
+- Source: [`scripts/sns-post-stock.user.js`](./scripts/sns-post-stock.user.js)
+- Install / update: https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/sns-post-stock.user.js
+- 受け口: [`apps-script/sns-post-stock/Code.gs`](./apps-script/sns-post-stock/Code.gs)（Word Stockとは別のスプレッドシート・別デプロイ）
+- **対象**: `x.com` / `twitter.com` / `www.threads.com`（旧 `threads.net` も可）。タイムライン・検索・プロフィール・投稿詳細のどこでも、PC・スマホ（Violentmonkey対応ブラウザ）で使えます。
+- **操作**: 📌 を押すと保存して ✓ に変わります。保存済みの投稿をもう一度押すと、新しい行は作らず数値（いいね等）を更新し、その時点の数値をスナップショットとして追記します。
+- **シートの列**（シート名「投稿」）: 保存日時 / SNS / 投稿者 / ハンドル / 本文 / 投稿日時 / いいね / リポスト / 返信 / 引用 / ブックマーク / 表示 / シェア / メディア数 / リンク / 回数 / 最終保存 / タグ / メモ / JSON。**タグ・メモは手で自由に記入**でき、再保存しても上書きされません。キー列（`x:123…` / `threads:Cxyz…`）は非表示列です。
+- **JSON列（エージェント向けの正データ）**: `platform, postId, url, author{name,handle}, text, lang, createdAt, metrics{likes,reposts,replies,quotes,bookmarks,views,shares}, media[{type,url,alt,poster}], links[{text,url,card}], quoted{author,text,createdAt,url}, truncated, context（Xの「〜さんがリポスト」等）, isReply, rawText（Threadsのみ）, savedFrom, firstSavedAt, lastSavedAt, saveCount, snapshots[{at,metrics}]（最大30件）, scriptVersion`。画面に表示されていない数値は入りません（例: Xの引用数、Threadsの表示数）。
+- **エージェントからの読み出し**: Apps Script の「スクリプト プロパティ」に `READ_TOKEN`（長いランダム文字列）を設定すると、`GET <ウェブアプリURL>?action=list&token=…` で保存済み投稿をJSONで取得できます（`&platform=x|threads`、`&since=2026-11-01`（最終保存日時）、`&limit=200`（最大2000））。1件は `?action=get&token=…&key=x:123…`。`READ_TOKEN` 未設定の間は読み出しAPIは無効です。スプレッドシート自体をGoogle Drive経由で読ませても構いません。
+- **注意（本文）**: Xのタイムラインで「さらに表示」になっている長文は省略された本文までしか取れません（`truncated: true`、トーストでもお知らせ）。投稿詳細を開いてもう一度押すと全文で上書きされます。
+- **注意（Threads）**: ThreadsのDOMはクラス名が難読化されているため、本文は `span[dir=auto]` からの推定です。取りこぼしや「翻訳を見る」等の混入に備えて、表示テキスト全体を `rawText` にも保存しています。メディアURL（X・ThreadsのCDN）は期限切れになることがあります。
+- **検証**: 構文チェック、モックDOMでのX/Threads抽出（本文・絵文字・省略URL復元・数値の「1.2K」「1.2万」変換・引用・リンク展開）、Apps Scriptのモックでの重複更新・スナップショット・読み出しAPI・数式インジェクション防止を確認済み。**実際のX/Threadsページでの動作確認は未実施**です。ボタンが出ない・値が空のときは、コンソールで `__snsPostStockDebug()` の結果を見ると切り分けられます。
+
+#### 初回セットアップ
+
+1. 新しいGoogleスプレッドシートを作り、`拡張機能 > Apps Script` を開く。
+2. `Code.gs` の中身を [`apps-script/sns-post-stock/Code.gs`](./apps-script/sns-post-stock/Code.gs) で置き換えて保存。
+3. （エージェントに読ませる場合）`プロジェクトの設定 > スクリプト プロパティ` に `READ_TOKEN` を追加。
+4. `デプロイ > 新しいデプロイ` → 種類「ウェブアプリ」、実行するユーザー「自分」、アクセスできるユーザー「全員」でデプロイし、表示された権限を許可。
+5. ウェブアプリURL（`…/exec`）をコピーし、XかThreadsでViolentmonkeyのメニュー → `投稿ストック: 保存先URLを設定` に貼り付け（未設定のまま初めて📌を押したときも聞かれます）。保存先URLはXとThreadsで共通です。
+
+- **注意**: ウェブアプリURLと `READ_TOKEN` はこのリポジトリに入れません。URLを知っている人は行を追加でき、URLと `READ_TOKEN` の両方を知っている人は保存内容を読めます。`Code.gs` を変更したときは「デプロイを管理」から同じデプロイの新バージョンを作るとURLが変わりません。
+
 ### X Inline Translator（Chrome組み込みAI）
 
 Xのタイムライン上で投稿を日本語へ翻訳し、選択した英単語・フレーズの日本語訳をポップアップ表示します。既存の `X Lightweight` と併用できます。
@@ -150,10 +176,14 @@ Stylus バックアップ内にも X Lightweight が含まれていましたが�
 
 ```text
 violentmonkey/
+├── apps-script/
+│   ├── sns-post-stock/Code.gs
+│   └── word-stock/Code.gs
 ├── scripts/
 │   ├── bilibili-dual-subtitles.user.js
 │   ├── bilibili-minimal.user.js
 │   ├── chatgpt-lightweight.user.js
+│   ├── sns-post-stock.user.js
 │   ├── x-inline-translator.user.js
 │   ├── x-lightweight.user.js
 │   ├── youtube-preference-pusher.user.js
