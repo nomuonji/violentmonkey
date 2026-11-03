@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SNS Post Stock (X / Threads)
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      1.1.0
+// @version      1.1.1
 // @description  One tap on 📌 saves (hover / long-press for tags) an X / Threads post (text, author, metrics, media, links) to a Google Spreadsheet for later analysis.
 // @author       nomuonji
 // @match        https://x.com/*
@@ -31,7 +31,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.1.0';
+  const VERSION = '1.1.1';
   const URL_KEY = 'webAppUrl';
   const SAVED_KEY = 'savedKeys';
   const MAX_SAVED_KEYS = 5000;
@@ -72,6 +72,30 @@
   }
 
   // ---- Network -----------------------------------------------------------
+  // Apps Script answers with an HTML page instead of JSON when the deployment
+  // is not reachable as intended; turn the common cases into a readable hint.
+  function explainHtml(res) {
+    const html = String(res.responseText || '');
+    const finalUrl = String(res.finalUrl || '');
+    const title = (html.match(/<title>([^<]*)<\/title>/i) || [])[1] || '';
+    const text = html.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ').replace(/&[a-z#0-9]+;/gi, ' ').replace(/\s+/g, ' ').trim();
+    if (/accounts\.google\.com|ServiceLogin/i.test(finalUrl + html)) {
+      return 'Googleのログイン画面が返りました。デプロイの「アクセスできるユーザー」を「全員」にしてください';
+    }
+    if (/doPost|doGet/.test(text) && /(not found|見つかりません)/i.test(text)) {
+      return 'doPostが見つかりません。Code.gsを保存してから、デプロイを管理で新バージョンを作ってください';
+    }
+    if (/(permission|権限|access denied|アクセス|許可)/i.test(text)) {
+      return 'アクセスが拒否されました。デプロイを「自分として実行・全員がアクセス可」で作り直し、権限を許可してください';
+    }
+    if (/(not found|見つかりません|404)/i.test(title + text)) {
+      return 'ウェブアプリが見つかりません。保存先URL（…/exec）が最新のデプロイか確認してください';
+    }
+    const detail = (text || title).slice(0, 120);
+    return 'GASがJSONではなくHTMLを返しました' + (detail ? '：' + detail : '');
+  }
+
   function postJson(url, payload) {
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
@@ -82,17 +106,41 @@
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         data: JSON.stringify(payload),
         onload: res => {
+          const body = String(res.responseText || '').trim();
+          if (body.startsWith('<')) {
+            console.warn('[SNS Post Stock] HTML response', res.status, res.finalUrl, body.slice(0, 2000));
+            reject(new Error(explainHtml(res)));
+            return;
+          }
           if (res.status < 200 || res.status >= 300) {
             reject(new Error('HTTP ' + res.status));
             return;
           }
-          try { resolve(JSON.parse(res.responseText)); } catch (error) { reject(error); }
+          try {
+            resolve(JSON.parse(body));
+          } catch {
+            reject(new Error('応答を読めませんでした：' + body.slice(0, 80)));
+          }
         },
-        onerror: () => reject(new Error('network error')),
-        ontimeout: () => reject(new Error('timeout'))
+        onerror: () => reject(new Error('通信エラー')),
+        ontimeout: () => reject(new Error('タイムアウト'))
       });
     });
   }
+
+  // Menu: check the deployment from here (same request path as a real save).
+  GM_registerMenuCommand('投稿ストック: 保存先の接続テスト', async () => {
+    const url = getWebAppUrl();
+    if (!url) { promptWebAppUrl(); return; }
+    toast('接続テスト中…');
+    try {
+      const result = await postJson(url, { action: 'tags' });
+      if (!result?.ok) throw new Error(result?.error || 'unknown error');
+      toast('接続OK（タグ ' + (result.tags || []).length + '件）');
+    } catch (error) {
+      toast('接続NG：' + error.message, 'error');
+    }
+  });
 
   // ---- Helpers -----------------------------------------------------------
   // "1,234" / "1.2K" / "3.4M" / "1.2万" / "3億" → number
@@ -529,7 +577,7 @@
       event.preventDefault();
       event.stopPropagation();
       if (longPressed) { longPressed = false; return; } // the long press opened the panel
-      const touch = event.pointerType ? event.pointerType !== 'mouse' : matchMedia('(hover: none)').matches;
+      const touch = event.pointerType ? event.pointerType !== 'mouse' : Boolean(window.matchMedia && window.matchMedia('(hover: none)').matches);
       void run(btn, { save: true }).then(ok => {
         // No hover on touch screens: offer the tags right after a tap-save.
         if (ok && touch) openPanel(btn, true);
