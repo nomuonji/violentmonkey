@@ -93,28 +93,31 @@ X と Threads の各投稿のアクション行に **📌** ボタンを追加�
 
 ### Affiliate DB Clipper（Amazon / 楽天 → Free Consult）
 
-Amazon.co.jp と楽天市場の商品ページ右下に **＋ アフィDBに追加** ボタンを出し、ワンタップで Free Consult（nomuonji/free-consult-blog）の商品カタログに登録します。Affiliate Operator MCPを経由しません。
+Amazon.co.jp・楽天市場の商品ページと、楽天アフィリエイトの**リンク作成ページ**の右下にボタンを出し、ワンタップで Free Consult（nomuonji/free-consult-blog）の商品カタログに登録します。Affiliate Operator MCPは経由しません。
 
 - Source: [`scripts/affiliate-db-clipper.user.js`](./scripts/affiliate-db-clipper.user.js)
 - Install / update: https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/affiliate-db-clipper.user.js
-- **保存先（どちらも現行の正本）**
-  - Amazon → Free Consult Worker の REST API `https://consult.antonbase.com/api/affiliate-intelligence`（`save_amazon_product`）→ Firestore `amazon_products`。管理画面 `/intelligence/products/` と同じ検証・リビジョン確認を通ります。Firestoreのサービスアカウント鍵はブラウザに置きません。
-  - 楽天 → GitHub Contents API で `data/sellable-catalog.json`（main）に1行追記。管理画面 `/intelligence/bestsellers/` と同じ書式です。サイト反映はCloudflareのビルド後。
+- **保存先**: Free Consult Worker の REST API `https://consult.antonbase.com/api/affiliate-intelligence`。Amazonは Firestore `amazon_products`、楽天は Firestore `rakuten_products` に入ります。管理画面（`/intelligence/products/`・`/intelligence/rakuten/`）と同じ検証・リビジョン確認を通るので、Firestoreの鍵はブラウザに置きません。
+- **画像の扱い**（free-consult-blog `docs/SOCIAL_PRODUCT_IMAGE_USAGE.md` に準拠）
+  - Amazon: 画像URLは保存しません。ページから取った画像は正規のAPI経由ではなく、画像URLの保存も24時間が上限だからです。画像は管理画面で扱います。
+  - 楽天の商品ページ: 画像は取りません（商品ページからの取得は禁止）。
+  - 楽天のリンク作成ページ: 生成されたリンクHTMLから、アフィリエイトURLと画像URL（楽天の画像ホストのみ）を保存します。サイトでは、アフィリエイトリンクを公開したときだけ、そのリンクと一緒に画像が出ます。
 - **登録される内容**
-  - Amazon: ASIN、商品名、正規URL（`/dp/ASIN`）、状態 `draft`、Amazonのパンくずをメモに、メイン画像のAmazon配信URL（`m.media-amazon.com`、メニューでOFF可）。アソシエイトタグを設定していれば `affiliateUrl` も保存しますが、広告表示（`affiliateEnabled`）は管理画面の確認ゲートでONにします。
-  - 楽天: `rakuten-<ショップ>-<商品コード>` のID、商品名、正規URL、状態 `research`、`sourceKind: retailer_listing`、確認日。**画像は保存しません**（楽天の画像はリンク作成ページ由来に限るため）。`published` は販売根拠が要るので管理画面で。
-- **重複**: 押すとまず既存を確認し、登録済みなら作り直さず編集パネルを開きます（楽天は同じ商品URLの既存行も一致扱い）。
-- **編集パネル**: 登録直後と登録済み商品で開き、商品名・カテゴリ（前回の値・最近使った値を候補表示）・紹介文・棚（変な商品／便利な商品）・共通商品ID・状態を更新できます。Amazonと楽天で同じ商品なら共通商品IDを揃えると1枚のカードに統合されます。紹介文は商品ページの文章を貼らず自分の言葉で。
+  - Amazon: ASIN、商品名、正規URL（`/dp/ASIN`）、状態 `draft`、パンくずはメモに。アソシエイトタグを設定していれば `affiliateUrl` も保存します。
+  - 楽天の商品ページ: `rakuten-<ショップ>-<商品コード>` のID、商品名、正規URL、状態 `research`、確認日。
+  - 楽天のリンク作成ページ: 上に加えて、アフィリエイトURLと画像。登録済みの商品なら、その行にリンクと画像だけを足します。リンクが複数あるときは、どれを保存するか選べます。
+  - 広告表示（`affiliateEnabled`）と公開は、どちらも管理画面で確認してからONにします。
+- **重複**: 押すとまず既存を確認し、登録済みなら作り直さず編集パネルを開きます。楽天は同じ商品ページの行を一致扱いにします（大文字小文字は無視、移行前からある行も含む）。
+- **編集パネル**: 商品名・カテゴリ（前回の値・最近使った値を候補表示）・紹介文・棚（変な商品／便利な商品）・共通商品ID・状態を更新できます。Amazonと楽天で同じ商品なら、共通商品IDを揃えると1枚のカードにまとまります。紹介文は商品ページの文章を貼らず、自分の言葉で。
 
 #### 初回セットアップ
 
-1. Amazonの商品ページでViolentmonkeyメニュー → `アフィDB: Amazon用 管理者トークンを設定` に、Free Consult管理画面で使っている管理者トークンを入力（未設定のまま押したときも聞かれます）。
-2. 楽天用に GitHub の **Fine-grained PAT** を作成（Repository access: `nomuonji/free-consult-blog` のみ、Permissions: `Contents: Read and write` のみ）し、楽天の商品ページでメニュー → `アフィDB: 楽天用 GitHubトークンを設定` に入力。
-3. （任意）`アフィDB: Amazonアソシエイトタグを設定`、`アフィDB: Amazon画像URLの保存 ON/OFF`。
-4. `アフィDB: 接続テスト` で確認。
+1. Violentmonkeyメニュー → `アフィDB: 管理者トークンを設定` に、Free Consult管理画面で使っている管理者トークンを入力します（未設定のまま押したときも聞かれます）。Amazonと楽天で共通です。
+2. （任意）`アフィDB: Amazonアソシエイトタグを設定`。
+3. `アフィDB: 接続テスト` で確認します。
 
 - **注意**: トークンはこのブラウザのViolentmonkeyにだけ保存し、このリポジトリには入れません。管理者トークンはFree Consultの管理APIを読み書きできるので、共有端末では使わないでください。401が返ったトークンは自動で消去され、次回入力を求めます。
-- **検証**: 構文チェック、モックDOM＋モックAPIでの登録・既存検知・パネル更新・リビジョン競合時の再試行・GitHub sha競合時の再試行・誤トークン・検索ページ非表示を確認。Amazonへの送信内容はWorkerの実際の `validate`、楽天の行は `validateItem` と `scripts/check-sellable.mjs` を通過。楽天の実商品ページで抽出を確認済み。**Amazonの実ページは検証環境からボット判定ページが返るため未確認**です（一般的な `#productTitle` / `#landingImage` / `#ASIN` を使用）。ボタンが出ないときはコンソールで `__affiliateDbClipperDebug()` を確認してください。
+- **検証**: Workerの実際のハンドラー（`amazonAdminRequest` / `rakutenAdminRequest`）とメモリ上の偽Firestoreをつないで、登録・既存検知・パネル更新・リンク作成ページからのリンクと画像の追加・複数リンクの選択・楽天以外の画像の除外・公開投影（リンクが無効な間は画像を出さない）・誤トークンを確認しました。楽天の実商品ページでの読み取りも確認済みです。**Amazonの実ページ**（検証環境ではボット判定ページが返る）と、**楽天のリンク作成ページの実画面**（ログインが必要）は未確認です。ボタンが出ないときはコンソールで `__affiliateDbClipperDebug()` を確認してください。
 
 ### X Inline Translator（Chrome組み込みAI）
 

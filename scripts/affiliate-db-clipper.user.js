@@ -1,45 +1,44 @@
 // ==UserScript==
 // @name         Affiliate DB Clipper (Amazon / Rakuten → Free Consult)
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      1.0.0
-// @description  One tap on an Amazon.co.jp / Rakuten Ichiba product page adds the product to the Free Consult affiliate catalog (Amazon → Affiliate Operator Firestore via the Worker REST API, Rakuten → GitHub data/sellable-catalog.json).
+// @version      1.1.0
+// @description  One tap on an Amazon.co.jp / Rakuten Ichiba product page (or the Rakuten Affiliate link-creation page) adds the product to the Free Consult catalog in Affiliate Operator Firestore (amazon_products / rakuten_products) via the Worker REST API.
 // @author       nomuonji
 // @match        https://www.amazon.co.jp/*
 // @match        https://amazon.co.jp/*
 // @match        https://item.rakuten.co.jp/*
+// @match        https://affiliate.rakuten.co.jp/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @connect      consult.antonbase.com
-// @connect      api.github.com
 // @noframes
 // @updateURL    https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/affiliate-db-clipper.user.js
 // @downloadURL  https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/affiliate-db-clipper.user.js
 // ==/UserScript==
 
 /*
- * Destinations (both are the current sources of truth documented in
- * nomuonji/free-consult-blog AGENTS.md / docs/SELLABLE_CATALOG.md):
- *   Amazon  → POST https://consult.antonbase.com/api/affiliate-intelligence
- *             {action:'save_amazon_product'} → Firestore `amazon_products`
- *             (same validation and revision check as /intelligence/products/).
- *   Rakuten → GitHub Contents API, nomuonji/free-consult-blog
- *             data/sellable-catalog.json on main (same as /intelligence/bestsellers/).
- * Tokens are kept only in Violentmonkey's script storage, never in this repo.
+ * Destination (source of truth per nomuonji/free-consult-blog AGENTS.md):
+ *   POST https://consult.antonbase.com/api/affiliate-intelligence
+ *     Amazon  {action:'save_amazon_product'}  → Firestore `amazon_products`
+ *     Rakuten {action:'save_rakuten_product'} → Firestore `rakuten_products`
+ *   Same validation and revision checks as /intelligence/products/ and /intelligence/rakuten/.
+ * Image policy (free-consult-blog docs/SOCIAL_PRODUCT_IMAGE_USAGE.md):
+ *   Amazon: no image URLs are stored (page scraping is not the licensed API and
+ *           stored image URLs are limited to 24h). Rakuten: images only from the
+ *           Rakuten Affiliate link-creation page, never from the item page.
+ * The admin token is kept only in Violentmonkey's script storage, never in this repo.
  */
 (() => {
   'use strict';
 
-  const VERSION = '1.0.0';
+  const VERSION = '1.1.0';
   const API = 'https://consult.antonbase.com/api/affiliate-intelligence';
-  const GH_API = 'https://api.github.com/repos/nomuonji/free-consult-blog/contents/data/sellable-catalog.json';
   const K = {
     adminToken: 'adminToken',
-    githubToken: 'githubToken',
     associateTag: 'associateTag',
-    captureImage: 'captureAmazonImage',
     categories: 'recentCategories',
     lastCategory: 'lastCategory',
     saved: 'savedKeys'
@@ -54,6 +53,7 @@
   const host = location.hostname;
   const IS_AMAZON = /(^|\.)amazon\.co\.jp$/.test(host);
   const IS_RAKUTEN = host === 'item.rakuten.co.jp';
+  const IS_RAKUTEN_AFFILIATE = host === 'affiliate.rakuten.co.jp';
 
   // ---- Small helpers -----------------------------------------------------
   const clean = s => String(s || '').replace(/\s+/g, ' ').trim();
@@ -125,9 +125,7 @@
     return v;
   }
   const ADMIN_HELP = 'Free Consult 管理画面（/intelligence/）で使っている管理者トークン（Cloudflareの AFFILIATE_INTELLIGENCE_ADMIN_TOKEN）。このブラウザのViolentmonkeyにだけ保存されます。';
-  const GH_HELP = 'GitHubのFine-grained PAT。対象リポジトリは nomuonji/free-consult-blog のみ、権限は Contents: Read and write だけにしてください。このブラウザのViolentmonkeyにだけ保存されます。';
-  const adminToken = () => ensureSecret(K.adminToken, 'Amazon用: 管理者トークン', ADMIN_HELP);
-  const githubToken = () => ensureSecret(K.githubToken, '楽天用: GitHubトークン', GH_HELP);
+  const adminToken = () => ensureSecret(K.adminToken, 'アフィDB: 管理者トークン', ADMIN_HELP);
 
   // ---- Amazon ------------------------------------------------------------
   function amazonAsin() {
@@ -136,23 +134,6 @@
     const fromInput = document.querySelector('input#ASIN, input[name="ASIN"]')?.value?.toUpperCase();
     const asin = fromUrl || fromInput || '';
     return /^[A-Z0-9]{10}$/.test(asin) ? asin : '';
-  }
-  function amazonImage() {
-    const img = document.querySelector('#landingImage, #imgBlkFront, #ebooksImgBlkFront, #main-image, #imgTagWrapperId img');
-    if (!img) return '';
-    let url = img.getAttribute('data-old-hires') || '';
-    if (!url) {
-      try {
-        const dyn = JSON.parse(img.getAttribute('data-a-dynamic-image') || '{}');
-        url = Object.entries(dyn).sort((a, b) => (b[1][0] * b[1][1]) - (a[1][0] * a[1][1]))[0]?.[0] || '';
-      } catch { /* ignore */ }
-    }
-    if (!url) url = img.currentSrc || img.src || '';
-    try {
-      const u = new URL(url);
-      if (u.protocol !== 'https:' || !['m.media-amazon.com', 'images-na.ssl-images-amazon.com'].includes(u.hostname)) return '';
-      return u.href.length <= 1200 ? u.href : '';
-    } catch { return ''; }
   }
   function amazonExtract() {
     const asin = amazonAsin();
@@ -163,7 +144,7 @@
     const crumbs = [...document.querySelectorAll('#wayfinding-breadcrumbs_feature_div a, #wayfinding-breadcrumbs_container a')]
       .map(a => clean(a.textContent)).filter(Boolean);
     const url = 'https://www.amazon.co.jp/dp/' + asin;
-    return { asin, title: title.slice(0, 180), crumbs, url, image: amazonImage() };
+    return { asin, title: title.slice(0, 180), crumbs, url };
   }
   function amazonPayload(data, edits) {
     const tag = String(GM_getValue(K.associateTag, '') || '').trim();
@@ -180,19 +161,12 @@
     };
     if (edits.catalogId) product.catalogId = edits.catalogId;
     if (/^[a-z0-9-]{2,50}-22$/.test(tag)) product.affiliateUrl = data.url + '?tag=' + tag;
-    if (data.image && GM_getValue(K.captureImage, true)) {
-      product.imageUrl = data.image;
-      product.imageAlt = data.title;
-      product.imageSourceType = 'amazon-product-page';
-      product.imageSourceUrl = data.url;
-    }
     return product;
   }
   const AMAZON_ERRORS = {
     unauthorized: '管理者トークンが違います（メニューから再設定）',
     conflict: 'ほかの編集と競合しました。もう一度押してください',
     invalid_product: '入力値が不正です（タイトル・カテゴリ・共通商品ID等）',
-    invalid_image_url: '画像URLが許可されていません',
     invalid_affiliate_url: 'アソシエイトタグの形式が不正です',
     amazon_catalog_backend_unavailable: 'Firestoreに接続できません（Worker側の障害）'
   };
@@ -233,143 +207,158 @@
     adminUrl: 'https://consult.antonbase.com/intelligence/products/'
   };
 
-  // ---- Rakuten -----------------------------------------------------------
+  // ---- Rakuten (Firestore rakuten_products via the Worker) ----------------
+  const canonicalItem = raw => {
+    try {
+      const u = new URL(raw);
+      if (u.protocol !== 'https:' || u.hostname !== 'item.rakuten.co.jp') return '';
+      const m = u.pathname.match(/^\/([^/]+)\/([^/]+)\/?$/);
+      return m ? 'https://item.rakuten.co.jp/' + m[1] + '/' + m[2] + '/' : '';
+    } catch { return ''; }
+  };
+  const rakutenId = url => {
+    const m = url.match(/^https:\/\/item\.rakuten\.co\.jp\/([^/]+)\/([^/]+)\/$/);
+    return m ? slug('rakuten-' + decodeURIComponent(m[1]) + '-' + decodeURIComponent(m[2])).slice(0, 110).replace(/-+$/, '') : '';
+  };
   function rakutenExtract() {
-    const m = location.pathname.match(/^\/([^/]+)\/([^/]+)\/?/);
-    if (!m || ['event', 'search', 'review'].includes(m[1])) return null;
-    const shop = decodeURIComponent(m[1]);
-    const code = decodeURIComponent(m[2]);
+    if (!IS_RAKUTEN) return null;
+    const url = canonicalItem(location.href);
+    if (!url || /^\/(event|search|review)\//.test(location.pathname)) return null;
     let title = clean(document.querySelector('.normal_reserve_item_name, .item_name, [class*="item-name"]')?.textContent);
     if (!title) {
       title = clean(document.querySelector('meta[property="og:title"]')?.content || document.title)
         .replace(/^【楽天市場】\s*/, '').replace(/\s*[:：][^:：]*$/, '');
     }
     if (!title) return null;
-    const id = slug('rakuten-' + shop + '-' + code).slice(0, 90).replace(/-+$/, '');
-    const url = 'https://item.rakuten.co.jp/' + shop + '/' + code + '/';
     const siteName = clean(document.querySelector('meta[property="og:site_name"]')?.content);
-    const shopName = siteName && siteName !== '楽天市場' ? siteName : '';
-    return { id, shop, code, title: title.slice(0, 180), url, shopName };
+    return { kind: 'item', id: rakutenId(url), url, title: title.slice(0, 180),
+      shopName: siteName && siteName !== '楽天市場' ? siteName : '' };
   }
-  function rakutenItem(d, edits) {
-    return {
-      id: d.id,
-      type: 'product',
-      network: 'rakuten',
-      category: edits.category || 'そのほか',
-      title: d.title,
-      summary: edits.summary || '',
-      audience: '',
-      caution: '',
-      status: edits.status || 'research',
-      publicReady: false,
-      // Rakuten images may only come from the Rakuten Affiliate link-creation
-      // page (docs/SOCIAL_PRODUCT_IMAGE_USAGE.md §3), never the item page.
-      imageUrl: '',
-      destinationUrl: d.url,
-      sourceUrl: d.url,
-      sourceDate: todayJst(),
-      sourceKind: 'retailer_listing',
-      rank: null,
-      evidenceText: '',
-      affiliateEnabled: false,
-      affiliateApproved: false,
-      affiliateUrl: '',
-      metrics: {},
-      internalNote: 'Affiliate DB Clipper v' + VERSION + ' で ' + todayJst() + ' に楽天商品ページから登録'
-        + (d.shopName ? '（ショップ: ' + d.shopName + '）' : '') + '。販売根拠・画像・提携は未確認。',
-      catalogId: edits.catalogId || 'product-' + d.id,
-      editorialShelves: edits.shelves || []
-    };
+  // Rakuten Affiliate "link creation" page: read the generated link HTML.
+  // Images are taken ONLY from here (docs/SOCIAL_PRODUCT_IMAGE_USAGE.md §3).
+  const decodeEntities = t => String(t).replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+  function linkTarget(href) {
+    try {
+      const u = new URL(decodeEntities(href));
+      if (u.hostname !== 'hb.afl.rakuten.co.jp') return '';
+      for (const key of ['pc', 'm']) {
+        const v = u.searchParams.get(key);
+        if (v && canonicalItem(v)) return canonicalItem(v);
+      }
+    } catch { /* ignore */ }
+    return '';
   }
-  function b64decode(s) {
-    return new TextDecoder().decode(Uint8Array.from(atob(String(s).replace(/\s/g, '')), c => c.charCodeAt(0)));
+  function linkBuilderExtract() {
+    if (!IS_RAKUTEN_AFFILIATE) return [];
+    const snippets = [];
+    for (const n of document.querySelectorAll('textarea, input[type="text"], input:not([type])')) if (n.value) snippets.push(n.value);
+    for (const a of document.querySelectorAll('a[href*="hb.afl.rakuten.co.jp"]')) snippets.push((a.closest('table, div') || a).outerHTML);
+    const found = new Map();
+    for (const raw of snippets) {
+      const html = /<a[\s>]/i.test(raw) ? raw : '';
+      const doc = html ? new DOMParser().parseFromString(html, 'text/html') : null;
+      const anchors = doc ? [...doc.querySelectorAll('a[href]')] : [];
+      const hrefs = anchors.length ? anchors.map(a => a.getAttribute('href'))
+        : (raw.match(/https:\/\/hb\.afl\.rakuten\.co\.jp\/[^\s"'<>]+/g) || []);
+      for (const href of hrefs) {
+        const url = linkTarget(href);
+        if (!url) continue;
+        const affiliateUrl = decodeEntities(href);
+        const imgs = doc ? [...doc.querySelectorAll('img[src]')].map(i => i.getAttribute('src')) : [];
+        const imageUrl = imgs.map(decodeEntities).find(src => {
+          try { const u = new URL(src); return u.protocol === 'https:' && ['thumbnail.image.rakuten.co.jp', 'tshop.r10s.jp', 'image.rakuten.co.jp'].includes(u.hostname); }
+          catch { return false; }
+        }) || '';
+        const texts = anchors.map(a => clean(a.textContent)).filter(t => t && !/^https?:/.test(t));
+        const alt = doc ? clean(doc.querySelector('img[alt]')?.getAttribute('alt')) : '';
+        const title = (texts.sort((x, y) => y.length - x.length)[0] || alt || '').replace(/^【楽天市場】\s*/, '').slice(0, 180);
+        const prev = found.get(url);
+        // Prefer the snippet that carries an image and a product name.
+        if (!prev || (!prev.imageUrl && imageUrl) || (!prev.title && title))
+          found.set(url, { kind: 'link', id: rakutenId(url), url, affiliateUrl, imageUrl: imageUrl || prev?.imageUrl || '', title: title || prev?.title || '' });
+      }
+    }
+    return [...found.values()];
   }
-  function b64encode(s) {
-    const a = new TextEncoder().encode(s);
-    let out = '';
-    for (let i = 0; i < a.length; i += 6000) out += String.fromCharCode(...a.subarray(i, i + 6000));
-    return btoa(out);
-  }
-  async function gh(method, body) {
-    const token = await githubToken();
-    if (!token) throw new Error('GitHubトークンが未設定です');
+  const RAKUTEN_ERRORS = {
+    unauthorized: '管理者トークンが違います（メニューから再設定）',
+    conflict: 'ほかの編集と競合しました。もう一度押してください',
+    image_not_from_link_builder: '画像はリンク作成ページ由来のものしか登録できません',
+    invalid_affiliate_url: 'アフィリエイトURLの形式が不正です',
+    invalid_destination_url: '楽天市場の商品ページURLではありません',
+    invalid_id: 'IDが不正です',
+    rakuten_catalog_backend_unavailable: 'Firestoreに接続できません（Worker側の障害）'
+  };
+  async function rakutenApi(method, query, body) {
+    const token = await adminToken();
+    if (!token) throw new Error('管理者トークンが未設定です');
     const res = await request({
-      method, url: GH_API + (method === 'GET' ? '?ref=main&t=' + Date.now() : ''), body,
-      headers: { Accept: 'application/vnd.github+json', Authorization: 'Bearer ' + token,
-        'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' }
+      method, url: API + (query ? '?' + query : ''), body,
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }
     });
-    if (res.status === 401) GM_setValue(K.githubToken, '');
+    if (res.status === 401) GM_setValue(K.adminToken, '');
     if (res.status < 200 || res.status >= 300) {
-      const err = new Error(res.status === 401 ? 'GitHubトークンが無効です（メニューから再設定）'
-        : res.status === 403 || res.status === 404 ? 'GitHubトークンに free-consult-blog の Contents 書き込み権限がありません'
-          : 'GitHub ' + res.status + '：' + (res.json?.message || ''));
-      err.status = res.status;
+      const code = res.json?.error || 'HTTP ' + res.status;
+      const err = new Error(RAKUTEN_ERRORS[code] || code);
+      err.code = code; err.existingId = res.json?.existingId;
       throw err;
     }
     return res.json;
   }
-  async function readCatalog() {
-    const file = await gh('GET');
-    const catalog = JSON.parse(b64decode(file.content));
-    if (catalog?.schemaVersion !== 1 || !Array.isArray(catalog.items)) throw new Error('sellable-catalog.json の形式が想定外です');
-    return { sha: file.sha, catalog };
+  function rakutenNewItem(d, edits) {
+    return {
+      id: d.id, title: d.title || d.url, category: edits.category || 'そのほか', summary: '',
+      status: 'research', destinationUrl: d.url, sourceUrl: d.url, sourceDate: todayJst(),
+      sourceKind: 'retailer_listing', editorialShelves: [], catalogId: 'product-' + d.id,
+      internalNote: 'Affiliate DB Clipper v' + VERSION + ' で ' + todayJst() + ' に'
+        + (d.kind === 'link' ? '楽天アフィリエイトのリンク作成ページから登録。' : '楽天商品ページから登録。')
+        + (d.shopName ? '（ショップ: ' + d.shopName + '）' : '') + '販売根拠・提携条件は未確認。'
+    };
   }
-  // Read-modify-write with the file sha; retried once if someone saved first.
-  async function writeCatalog(mutate, message) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const { sha, catalog } = await readCatalog();
-      const result = mutate(catalog);
-      if (result === undefined) return null;
-      const updated = { ...catalog, updatedAt: todayJst() };
-      try {
-        await gh('PUT', { message, branch: 'main', sha, content: b64encode(JSON.stringify(updated, null, 2) + '\n') });
-        return result;
-      } catch (e) {
-        if (attempt === 0 && (e.status === 409 || e.status === 422)) continue;
-        throw e;
-      }
-    }
-    return null;
-  }
-  const findRakuten = (catalog, d) => catalog.items.find(x => x.id === d.id
-    || (x.network === 'rakuten' && String(x.destinationUrl || '').replace(/\/?(\?.*)?$/, '/') === d.url));
+  // Link-builder data: the affiliate link and its image. affiliateEnabled stays
+  // off; it is switched on in the admin page after the PR/media checks.
+  const linkFields = d => d.kind !== 'link' ? {} : {
+    affiliateUrl: d.affiliateUrl,
+    ...(d.imageUrl ? { imageUrl: d.imageUrl, imageAlt: d.title, imageSourceType: 'rakuten-affiliate-link-builder' } : {})
+  };
   const Rakuten = {
-    key: d => 'rakuten:' + d.id,
+    key: d => 'rakuten:' + d.url,
     async load(d) {
-      const { catalog } = await readCatalog();
-      return findRakuten(catalog, d) || null;
+      const r = await rakutenApi('GET', 'collection=rakuten_products&url=' + encodeURIComponent(d.url));
+      return r?.item || null;
     },
     async create(d) {
-      let item = null;
-      await writeCatalog(catalog => {
-        const existing = findRakuten(catalog, d);
-        if (existing) { item = existing; return undefined; }
-        item = rakutenItem(d, { category: defaultCategory(), shelves: [] });
-        catalog.items.push(item);
-        return item;
-      }, 'data: add Rakuten item ' + d.id + ' via Affiliate DB Clipper');
-      return item;
+      const product = { ...rakutenNewItem(d, { category: defaultCategory() }), ...linkFields(d) };
+      try {
+        const r = await rakutenApi('POST', '', { action: 'save_rakuten_product', product, sourceSystem: 'affiliate-db-clipper' });
+        return r.item;
+      } catch (e) {
+        if (e.code === 'duplicate_item') return this.load(d);
+        if (e.code === 'conflict') {
+          // A row with this ID already exists (e.g. same item, different URL casing).
+          const r = await rakutenApi('GET', 'collection=rakuten_products&id=' + encodeURIComponent(d.id));
+          if (r?.item) return d.kind === 'link' ? this.attachLink(d, r.item) : r.item;
+        }
+        throw e;
+      }
+    },
+    // On the link-creation page an existing row gets the link and image added.
+    async attachLink(d, existing) {
+      const r = await rakutenApi('POST', '', { action: 'save_rakuten_product',
+        product: { id: existing.id, ...linkFields(d) }, expectedUpdateTime: existing._updateTime });
+      return r.item;
     },
     async update(d, existing, edits) {
-      let item = null;
-      await writeCatalog(catalog => {
-        const target = catalog.items.find(x => x.id === existing.id);
-        if (!target) throw new Error('対象の行がカタログから消えています');
-        target.title = edits.title;
-        target.category = edits.category;
-        target.summary = edits.summary;
-        target.editorialShelves = edits.shelves;
-        if (edits.catalogId) target.catalogId = edits.catalogId;
-        if (edits.status) target.status = edits.status;
-        item = target;
-        return target;
-      }, 'data: edit Rakuten item ' + existing.id + ' via Affiliate DB Clipper');
-      return item;
+      const product = { id: existing.id, title: edits.title, category: edits.category, summary: edits.summary,
+        editorialShelves: edits.shelves, status: edits.status };
+      if (edits.catalogId) product.catalogId = edits.catalogId;
+      const r = await rakutenApi('POST', '', { action: 'save_rakuten_product', product,
+        expectedUpdateTime: existing._updateTime });
+      return r.item;
     },
-    // 'published' needs a sales signal & evidence (src/lib/sellable.mjs), so it is set in the admin page.
+    // 'published' also needs the 公開確認 check, so it is set in the admin page.
     statuses: [['research', '調査中'], ['ready', '掲載準備'], ['archived', '保管']],
-    adminUrl: 'https://consult.antonbase.com/intelligence/bestsellers/'
+    adminUrl: 'https://consult.antonbase.com/intelligence/rakuten/'
   };
 
   // ---- UI ----------------------------------------------------------------
@@ -425,8 +414,10 @@
     const { btn } = state;
     if (!btn) return;
     btn.dataset.state = kind;
-    btn.textContent = kind === 'busy' ? '… 保存中' : kind === 'saved' ? '✓ DB登録済み' : '＋ アフィDBに追加';
-    btn.title = kind === 'saved' ? 'クリックで編集パネル' : (IS_AMAZON ? 'Free Consult の amazon_products に下書きで登録' : 'Free Consult の楽天カタログに調査中で登録');
+    btn.textContent = kind === 'busy' ? '… 保存中' : kind === 'saved' ? '✓ DB登録済み'
+      : IS_RAKUTEN_AFFILIATE ? '＋ リンクと画像をDBへ' : '＋ アフィDBに追加';
+    btn.title = kind === 'saved' ? 'クリックで編集パネル' : IS_AMAZON ? 'Free Consult の amazon_products に下書きで登録'
+      : IS_RAKUTEN_AFFILIATE ? '作成したアフィリエイトリンクと画像を rakuten_products に保存' : 'Free Consult の rakuten_products に調査中で登録';
   }
 
   function closePanel() { state.panel?.remove(); state.panel = null; }
@@ -439,7 +430,7 @@
     panel.style.position = 'relative';
     const close = el('button', { class: 'adc-close', type: 'button', 'aria-label': '閉じる' }, '×');
     close.onclick = closePanel;
-    panel.append(close, el('div', { class: 'adc-title' }, IS_AMAZON ? 'Amazon → amazon_products' : '楽天 → sellable-catalog.json'));
+    panel.append(close, el('div', { class: 'adc-title' }, IS_AMAZON ? 'Amazon → amazon_products' : '楽天 → rakuten_products'));
 
     const ttl = el('input', { type: 'text', maxlength: '180' });
     ttl.value = record.title || data.title;
@@ -508,12 +499,12 @@
           state.record = await adapter.update(data, latest, edits);
         } catch (e) {
           // Revision changed (e.g. edited in the admin page): reload once and retry.
-          if (!/競合/.test(e.message) || !IS_AMAZON) throw e;
+          if (!/競合/.test(e.message)) throw e;
           latest = await adapter.load(data);
           state.record = await adapter.update(data, latest, edits);
         }
         rememberCategory(edits.category);
-        msg.textContent = '更新しました' + (IS_RAKUTEN ? '（サイト反映はCloudflareのビルド後）' : '');
+        msg.textContent = '更新しました';
       } catch (e) {
         msg.className = 'adc-msg err'; msg.textContent = '更新できません：' + e.message;
       } finally { state.busy = false; save.disabled = false; }
@@ -524,11 +515,7 @@
     state.panel = panel;
   }
 
-  async function onClick() {
-    if (state.busy) return;
-    if (state.panel && state.record) { closePanel(); return; }
-    const data = state.adapter === Amazon ? amazonExtract() : rakutenExtract();
-    if (!data) { toast('商品情報を読み取れませんでした', 'error'); return; }
+  async function save(data) {
     state.data = data;
     state.busy = true; setButton('busy');
     try {
@@ -537,8 +524,13 @@
       if (!record) {
         record = await state.adapter.create(data);
         message = IS_AMAZON ? '下書きで登録しました。カテゴリ・紹介文・棚を足すなら下で更新。'
-          : '調査中で登録しました（サイト反映はCloudflareのビルド後）。';
+          : data.kind === 'link' ? '調査中で登録し、アフィリエイトリンク' + (data.imageUrl ? 'と画像' : '') + 'を保存しました。広告表示のONは管理画面で。'
+            : '調査中で登録しました。カテゴリ・紹介文・棚を足すなら下で更新。';
         toast('アフィDBに登録しました');
+      } else if (data.kind === 'link' && (record.affiliateUrl !== data.affiliateUrl || (data.imageUrl && record.imageUrl !== data.imageUrl))) {
+        record = await state.adapter.attachLink(data, record);
+        message = '登録済みの商品に、アフィリエイトリンク' + (data.imageUrl ? 'と画像' : '') + 'を保存しました。広告表示のONは管理画面で。';
+        toast('リンクを保存しました');
       }
       state.record = record;
       markSaved(state.adapter.key(data), todayJst());
@@ -550,13 +542,51 @@
     } finally { state.busy = false; }
   }
 
+  // Several generated links on the link-creation page: let the user pick one.
+  function openChooser(candidates) {
+    closePanel();
+    const panel = el('div', { class: 'adc-panel' });
+    panel.style.position = 'relative';
+    const close = el('button', { class: 'adc-close', type: 'button', 'aria-label': '閉じる' }, '×');
+    close.onclick = closePanel;
+    panel.append(close, el('div', { class: 'adc-title' }, 'どの商品を保存しますか？'));
+    for (const c of candidates) {
+      const b = el('button', { class: 'adc-save', type: 'button' }, (c.title || c.url).slice(0, 60) + (c.imageUrl ? ' 🖼' : ''));
+      b.style.cssText = 'display:block;width:100%;margin-top:8px;text-align:left';
+      b.onclick = () => { closePanel(); save(c); };
+      panel.append(b);
+    }
+    state.root.prepend(panel);
+    state.panel = panel;
+  }
+
+  function currentData() {
+    if (IS_AMAZON) return amazonExtract();
+    if (IS_RAKUTEN) return rakutenExtract();
+    if (IS_RAKUTEN_AFFILIATE) {
+      const list = linkBuilderExtract();
+      return list.length === 1 ? list[0] : list.length ? { kind: 'choice', list } : null;
+    }
+    return null;
+  }
+
+  async function onClick() {
+    if (state.busy) return;
+    if (state.panel) { closePanel(); return; }
+    const data = currentData();
+    if (!data) { toast('商品情報を読み取れませんでした', 'error'); return; }
+    if (data.kind === 'choice') { openChooser(data.list); return; }
+    if (state.record && state.data && state.adapter.key(state.data) === state.adapter.key(data) && data.kind !== 'link') { openPanel(''); return; }
+    await save(data);
+  }
+
   function mount() {
-    const adapter = IS_AMAZON ? Amazon : IS_RAKUTEN ? Rakuten : null;
-    const data = IS_AMAZON ? amazonExtract() : IS_RAKUTEN ? rakutenExtract() : null;
-    const key = data ? adapter.key(data) : '';
-    if (key === state.pageKey && document.getElementById(ROOT_ID)) return;
+    const adapter = IS_AMAZON ? Amazon : (IS_RAKUTEN || IS_RAKUTEN_AFFILIATE) ? Rakuten : null;
+    const data = currentData();
+    const key = !data ? '' : data.kind === 'choice' ? data.list.map(adapter.key).join('|') : adapter.key(data);
+    if (key === state.pageKey && (document.getElementById(ROOT_ID) || !key)) return;
     document.getElementById(ROOT_ID)?.remove();
-    Object.assign(state, { adapter, data, record: null, root: null, btn: null, panel: null, pageKey: key });
+    Object.assign(state, { adapter, data: null, record: null, root: null, btn: null, panel: null, pageKey: key });
     if (!data) return;
     if (!document.getElementById('adc-style')) {
       const s = el('style', { id: 'adc-style' }, STYLE);
@@ -568,17 +598,13 @@
     root.append(btn);
     document.body.append(root);
     state.root = root; state.btn = btn;
-    setButton(getSaved()[key] ? 'saved' : 'idle');
+    setButton(data.kind !== 'choice' && data.kind !== 'link' && getSaved()[key] ? 'saved' : 'idle');
   }
 
   // ---- Menu --------------------------------------------------------------
-  GM_registerMenuCommand('アフィDB: Amazon用 管理者トークンを設定', async () => {
-    const v = await askSecret('Amazon用: 管理者トークン', ADMIN_HELP);
+  GM_registerMenuCommand('アフィDB: 管理者トークンを設定', async () => {
+    const v = await askSecret('アフィDB: 管理者トークン', ADMIN_HELP);
     if (v !== null) { GM_setValue(K.adminToken, v); toast(v ? '管理者トークンを保存しました' : '管理者トークンを削除しました'); }
-  });
-  GM_registerMenuCommand('アフィDB: 楽天用 GitHubトークンを設定', async () => {
-    const v = await askSecret('楽天用: GitHubトークン', GH_HELP);
-    if (v !== null) { GM_setValue(K.githubToken, v); toast(v ? 'GitHubトークンを保存しました' : 'GitHubトークンを削除しました'); }
   });
   GM_registerMenuCommand('アフィDB: Amazonアソシエイトタグを設定（任意）', () => {
     const v = window.prompt('アソシエイトのトラッキングID（例: xxxxx-22）。登録時に affiliateUrl として保存します（広告表示のONは管理画面で）。空で削除。',
@@ -589,11 +615,6 @@
     GM_setValue(K.associateTag, tag);
     toast(tag ? 'タグを保存しました' : 'タグを削除しました');
   });
-  GM_registerMenuCommand('アフィDB: Amazon画像URLの保存 ON/OFF', () => {
-    const next = !GM_getValue(K.captureImage, true);
-    GM_setValue(K.captureImage, next);
-    toast('Amazon画像URLの保存: ' + (next ? 'ON' : 'OFF'));
-  });
   GM_registerMenuCommand('アフィDB: 接続テスト', async () => {
     toast('接続テスト中…');
     try {
@@ -601,8 +622,8 @@
         const r = await amazonApi('GET', 'collection=amazon_products&id=B000000000');
         toast('Amazon側 接続OK' + (r?.sourceOfTruth ? '（' + r.sourceOfTruth + '）' : ''));
       } else {
-        const { catalog } = await readCatalog();
-        toast('楽天側 接続OK（カタログ ' + catalog.items.length + '件）');
+        const r = await rakutenApi('GET', 'collection=rakuten_products&id=connection-test');
+        toast('楽天側 接続OK' + (r?.sourceOfTruth ? '（' + r.sourceOfTruth + '）' : ''));
       }
     } catch (e) { toast('接続NG：' + e.message, 'error'); }
   });
@@ -610,13 +631,14 @@
   // Amazon / Rakuten swap content without full reloads on some flows.
   mount();
   let lastHref = location.href;
+  // Re-check on navigation, and on the link-creation page whenever a link is generated.
   setInterval(() => {
-    if (location.href !== lastHref) { lastHref = location.href; mount(); }
-    else if (!document.getElementById(ROOT_ID) && state.data) mount();
+    if (location.href !== lastHref || IS_RAKUTEN_AFFILIATE) { lastHref = location.href; if (!state.busy && !state.panel) mount(); }
+    else if (!document.getElementById(ROOT_ID) && state.pageKey) mount();
   }, 1000);
   window.__affiliateDbClipperDebug = () => ({
-    version: VERSION, site: IS_AMAZON ? 'amazon' : IS_RAKUTEN ? 'rakuten' : 'other',
-    extracted: IS_AMAZON ? amazonExtract() : IS_RAKUTEN ? rakutenExtract() : null,
-    hasAdminToken: Boolean(GM_getValue(K.adminToken, '')), hasGithubToken: Boolean(GM_getValue(K.githubToken, ''))
+    version: VERSION, site: IS_AMAZON ? 'amazon' : IS_RAKUTEN ? 'rakuten' : IS_RAKUTEN_AFFILIATE ? 'rakuten-affiliate' : 'other',
+    extracted: currentData(),
+    hasAdminToken: Boolean(GM_getValue(K.adminToken, ''))
   });
 })();
