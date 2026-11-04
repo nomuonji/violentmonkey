@@ -93,7 +93,7 @@ X と Threads の各投稿のアクション行に **📌** ボタンを追加�
 
 ### Affiliate DB Clipper（Amazon / 楽天 → Free Consult）
 
-Amazon.co.jp・楽天市場の商品ページと、楽天アフィリエイトの**リンク作成ページ**の右下にボタンを出し、ワンタップで Free Consult の商品カタログへ登録します。最新 v1.2.0 はAmazonの商品属性・アフィリエイトURL・人気根拠・画像の利用証跡まで同じ編集パネルで管理します。Affiliate Operator MCPは経由しません。
+Amazon.co.jp・楽天市場の商品ページと、楽天アフィリエイトの**リンク作成ページ**の右下にボタンを出し、ワンタップで Free Consult の商品カタログへ登録します。最新 v1.2.1 はAmazonの商品属性・アフィリエイトURL・人気根拠・画像の利用証跡まで同じ編集パネルで管理します。Affiliate Operator MCPは経由しません。
 
 - Source: [`scripts/affiliate-db-clipper.user.js`](./scripts/affiliate-db-clipper.user.js)
 - Install / update: https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/affiliate-db-clipper.user.js
