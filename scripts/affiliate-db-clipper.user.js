@@ -150,20 +150,20 @@
     const text = String(raw || '').trim();
     if (!text) return '';
     const candidates = [];
-    if (/<a[\\s>]/i.test(text)) {
+    if (/<a[\s>]/i.test(text)) {
       try {
         const doc = new DOMParser().parseFromString(text, 'text/html');
         for (const anchor of doc.querySelectorAll('a[href]')) candidates.push(anchor.href);
       } catch { /* fall through to URL parsing */ }
     }
     if (!candidates.length) {
-      const direct = text.match(/https?:\\/\\/[^\\s"'<>]+/i)?.[0] || text;
+      const direct = text.match(/https?:\/\/[^\s"'<>]+/i)?.[0] || text;
       candidates.push(direct.replace(/&amp;/g, '&'));
     }
     for (const candidate of candidates) {
       try {
         const url = new URL(candidate);
-        const path = url.pathname.replace(/\\/$/, '');
+        const path = url.pathname.replace(/\/$/, '');
         if (url.protocol === 'https:' && url.hostname === 'www.amazon.co.jp' &&
           path === '/dp/' + asin && /^[a-z0-9-]{2,50}-22$/.test(url.searchParams.get('tag') || '')) {
           return url.href;
