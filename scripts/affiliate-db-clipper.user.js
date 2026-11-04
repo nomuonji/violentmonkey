@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Affiliate DB Clipper (Amazon / Rakuten → Free Consult)
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      1.1.0
-// @description  One tap on an Amazon.co.jp / Rakuten Ichiba product page (or the Rakuten Affiliate link-creation page) adds the product to the Free Consult catalog in Affiliate Operator Firestore (amazon_products / rakuten_products) via the Worker REST API.
+// @version      1.2.0
+// @description  Clip Amazon / Rakuten products to Free Consult with affiliate links, structured product metadata, popularity evidence and rights-aware image references.
 // @author       nomuonji
 // @match        https://www.amazon.co.jp/*
 // @match        https://amazon.co.jp/*
@@ -34,7 +34,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.1.0';
+  const VERSION = '1.2.0';
   const API = 'https://consult.antonbase.com/api/affiliate-intelligence';
   const K = {
     adminToken: 'adminToken',
@@ -48,7 +48,7 @@
     '美容・身だしなみ', 'ユニーク雑貨', '文房具', '防災', 'キッチン・生活', '家電・季節用品',
     '美容・スキンケア', '美容家電', 'ペット用品', 'ゲーム・趣味'
   ];
-  const SHELVES = [['odd', '変な商品'], ['useful', '便利な商品']];
+  const SHELVES = [['odd', '変な商品'], ['useful', '便利な商品'], ['popular', '人気・実績']];
   const ROOT_ID = 'adc-root';
   const host = location.hostname;
   const IS_AMAZON = /(^|\.)amazon\.co\.jp$/.test(host);
@@ -146,21 +146,60 @@
     const url = 'https://www.amazon.co.jp/dp/' + asin;
     return { asin, title: title.slice(0, 180), crumbs, url };
   }
+  function amazonSpecialLink(raw, asin) {
+    const text = String(raw || '').trim();
+    if (!text) return '';
+    const candidates = [];
+    if (/<a[\\s>]/i.test(text)) {
+      try {
+        const doc = new DOMParser().parseFromString(text, 'text/html');
+        for (const anchor of doc.querySelectorAll('a[href]')) candidates.push(anchor.href);
+      } catch { /* fall through to URL parsing */ }
+    }
+    if (!candidates.length) {
+      const direct = text.match(/https?:\\/\\/[^\\s"'<>]+/i)?.[0] || text;
+      candidates.push(direct.replace(/&amp;/g, '&'));
+    }
+    for (const candidate of candidates) {
+      try {
+        const url = new URL(candidate);
+        const path = url.pathname.replace(/\\/$/, '');
+        if (url.protocol === 'https:' && url.hostname === 'www.amazon.co.jp' &&
+          path === '/dp/' + asin && /^[a-z0-9-]{2,50}-22$/.test(url.searchParams.get('tag') || '')) {
+          return url.href;
+        }
+      } catch { /* try next candidate */ }
+    }
+    return '';
+  }
   function amazonPayload(data, edits) {
     const tag = String(GM_getValue(K.associateTag, '') || '').trim();
+    const explicitLink = amazonSpecialLink(edits.affiliateUrl, data.asin);
     const product = {
       asin: data.asin,
       title: data.title,
+      brand: edits.brand || '',
+      modelNumber: edits.modelNumber || '',
+      sourceCategoryPath: data.crumbs || [],
+      specifications: edits.specifications || '',
       category: edits.category || 'そのほか',
       summary: edits.summary || '',
       sourceUrl: data.url,
       status: edits.status || 'draft',
       notes: ('Affiliate DB Clipper v' + VERSION + ' で ' + todayJst() + ' にAmazon商品ページから登録。'
         + (data.crumbs.length ? ' Amazonカテゴリ: ' + data.crumbs.join(' > ') : '')).slice(0, 2000),
-      editorialShelves: edits.shelves || []
+      editorialShelves: edits.shelves || [],
+      popularitySignals: edits.popularitySignals || [],
+      imageUrl: edits.imageUrl || '',
+      imageAlt: edits.imageAlt || data.title,
+      imageSourceType: edits.imageSourceType || '',
+      imageSourceUrl: edits.imageSourceUrl || '',
+      imageUsageStatus: edits.imageUsageStatus || 'unverified',
+      imageUsageCheckedAt: edits.imageUsageCheckedAt || ''
     };
     if (edits.catalogId) product.catalogId = edits.catalogId;
-    if (/^[a-z0-9-]{2,50}-22$/.test(tag)) product.affiliateUrl = data.url + '?tag=' + tag;
+    if (explicitLink) product.affiliateUrl = explicitLink;
+    else if (/^[a-z0-9-]{2,50}-22$/.test(tag)) product.affiliateUrl = data.url + '?tag=' + tag;
     return product;
   }
   const AMAZON_ERRORS = {
@@ -196,8 +235,18 @@
       return r.item;
     },
     async update(d, existing, edits) {
-      const product = { asin: d.asin, title: edits.title, category: edits.category, summary: edits.summary,
-        editorialShelves: edits.shelves, status: edits.status };
+      const product = {
+        asin: d.asin, title: edits.title, brand: edits.brand, modelNumber: edits.modelNumber,
+        sourceCategoryPath: edits.sourceCategoryPath, specifications: edits.specifications,
+        category: edits.category, summary: edits.summary, editorialShelves: edits.shelves,
+        popularitySignals: edits.popularitySignals, status: edits.status,
+        imageUrl: edits.imageUrl, imageAlt: edits.imageAlt,
+        imageSourceType: edits.imageSourceType, imageSourceUrl: edits.imageSourceUrl,
+        imageUsageStatus: edits.imageUsageStatus, imageUsageCheckedAt: edits.imageUsageCheckedAt
+      };
+      const specialLink = amazonSpecialLink(edits.affiliateUrl, d.asin);
+      if (edits.affiliateUrl && !specialLink) throw new Error('AmazonアソシエイトのフルURLを確認してください（対象ASINとtag=...-22が必要。短縮URLは不可）');
+      if (specialLink) product.affiliateUrl = specialLink;
       if (edits.catalogId) product.catalogId = edits.catalogId;
       const r = await amazonApi('POST', '', { action: 'save_amazon_product', product,
         expectedUpdateTime: existing._updateTime });
@@ -368,7 +417,7 @@
  background:#24553f;color:#fff;font:700 13px system-ui,sans-serif;box-shadow:0 3px 12px rgba(0,0,0,.3);margin-left:auto}
 #${ROOT_ID} .adc-btn[data-state=saved]{background:#fff;color:#24553f;outline:2px solid #24553f}
 #${ROOT_ID} .adc-btn[data-state=busy]{opacity:.65;cursor:progress}
-#${ROOT_ID} .adc-panel{width:300px;max-width:86vw;background:#fff;border:1px solid #d5e1d9;border-radius:10px;padding:12px;margin-bottom:8px;
+#${ROOT_ID} .adc-panel{width:340px;max-width:88vw;max-height:76vh;overflow:auto;background:#fff;border:1px solid #d5e1d9;border-radius:10px;padding:12px;margin-bottom:8px;
  box-shadow:0 6px 24px rgba(0,0,0,.25)}
 #${ROOT_ID} .adc-panel label{display:block;margin-top:8px;font-size:12px;color:#546b60}
 #${ROOT_ID} .adc-panel input[type=text],#${ROOT_ID} .adc-panel textarea,#${ROOT_ID} .adc-panel select{width:100%;box-sizing:border-box;padding:5px 7px;
