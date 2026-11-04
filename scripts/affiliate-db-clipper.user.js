@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Affiliate DB Clipper (Amazon / Rakuten → Free Consult)
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      1.2.0
+// @version      1.2.1
 // @description  Clip Amazon / Rakuten products to Free Consult with affiliate links, structured product metadata, popularity evidence and rights-aware image references.
 // @author       nomuonji
 // @match        https://www.amazon.co.jp/*
@@ -34,7 +34,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.2.0';
+  const VERSION = '1.2.1';
   const API = 'https://consult.antonbase.com/api/affiliate-intelligence';
   const K = {
     adminToken: 'adminToken',
@@ -144,7 +144,11 @@
     const crumbs = [...document.querySelectorAll('#wayfinding-breadcrumbs_feature_div a, #wayfinding-breadcrumbs_container a')]
       .map(a => clean(a.textContent)).filter(Boolean);
     const url = 'https://www.amazon.co.jp/dp/' + asin;
-    return { asin, title: title.slice(0, 180), crumbs, url };
+    const siteStripeText = document.body?.innerText || '';
+    const directLinkUnsupported =
+      siteStripeText.includes('この商品はAmazonアソシエイトプログラムの対象外') ||
+      siteStripeText.includes('こちらの商品への直接リンクはサポートされていません');
+    return { asin, title: title.slice(0, 180), crumbs, url, directLinkUnsupported };
   }
   function amazonSpecialLink(raw, asin) {
     const text = String(raw || '').trim();
@@ -199,7 +203,7 @@
     };
     if (edits.catalogId) product.catalogId = edits.catalogId;
     if (explicitLink) product.affiliateUrl = explicitLink;
-    else if (/^[a-z0-9-]{2,50}-22$/.test(tag)) product.affiliateUrl = data.url + '?tag=' + tag;
+    else if (!data.directLinkUnsupported && /^[a-z0-9-]{2,50}-22$/.test(tag)) product.affiliateUrl = data.url + '?tag=' + tag;
     return product;
   }
   const AMAZON_ERRORS = {
@@ -245,8 +249,14 @@
         imageUsageStatus: edits.imageUsageStatus, imageUsageCheckedAt: edits.imageUsageCheckedAt
       };
       const specialLink = amazonSpecialLink(edits.affiliateUrl, d.asin);
-      if (edits.affiliateUrl && !specialLink) throw new Error('AmazonアソシエイトのフルURLを確認してください（対象ASINとtag=...-22が必要。短縮URLは不可）');
-      if (specialLink) product.affiliateUrl = specialLink;
+      if (d.directLinkUnsupported) {
+        if (edits.affiliateUrl) throw new Error('SiteStripeがこの商品への直接リンクを対象外と表示しています。商品URLにtagを付けて保存しないでください。');
+        product.affiliateUrl = '';
+        product.affiliateEnabled = false;
+      } else {
+        if (edits.affiliateUrl && !specialLink) throw new Error('AmazonアソシエイトのフルURLを確認してください（対象ASINとtag=...-22が必要。短縮URLは不可）');
+        product.affiliateUrl = specialLink || '';
+      }
       if (edits.catalogId) product.catalogId = edits.catalogId;
       const r = await amazonApi('POST', '', { action: 'save_amazon_product', product,
         expectedUpdateTime: existing._updateTime });
@@ -505,10 +515,14 @@
 
       const affiliateUrl = el('textarea', { maxlength: '1600', placeholder: 'SiteStripeで生成したフルURL、またはリンクHTMLを貼り付け' });
       const storedTag = String(GM_getValue(K.associateTag, '') || '').trim();
-      affiliateUrl.value = record.affiliateUrl || (/^[a-z0-9-]{2,50}-22$/.test(storedTag) ? data.url + '?tag=' + storedTag : '');
+      affiliateUrl.value = data.directLinkUnsupported ? '' :
+        (record.affiliateUrl || (/^[a-z0-9-]{2,50}-22$/.test(storedTag) ? data.url + '?tag=' + storedTag : ''));
+      affiliateUrl.disabled = data.directLinkUnsupported === true;
       const affiliateLabel = el('label', {}, 'Amazonアソシエイトリンク（フルURL）');
       affiliateLabel.append(affiliateUrl);
-      const affiliateHelp = el('div', {}, 'SiteStripeの「リンク生成」でフルリンクをコピーして貼り付けます。amzn.to短縮URLではなく、対象ASINと tag=...-22 を含むURLを使用。HTMLを貼ってもリンク先を取り出します。');
+      const affiliateHelp = data.directLinkUnsupported
+        ? el('div', {}, 'SiteStripeがこの商品をアソシエイト対象外と表示しています。直接リンクは生成せず、トラッキングIDを付けたURLも保存しません。')
+        : el('div', {}, 'SiteStripeの「リンク生成」でフルリンクをコピーして貼り付けます。amzn.to短縮URLではなく、対象ASINと tag=...-22 を含むURLを使用。HTMLを貼ってもリンク先を取り出します。');
 
       const purchase = (record.popularitySignals || []).find(x => x.kind === 'amazon_monthly_purchases') || {};
       const review = (record.popularitySignals || []).find(x => x.kind === 'amazon_review_snapshot') || {};

@@ -93,7 +93,7 @@ X と Threads の各投稿のアクション行に **📌** ボタンを追加�
 
 ### Affiliate DB Clipper（Amazon / 楽天 → Free Consult）
 
-Amazon.co.jp・楽天市場の商品ページと、楽天アフィリエイトの**リンク作成ページ**の右下にボタンを出し、ワンタップで Free Consult の商品カタログへ登録します。最新 v1.2.0 はAmazonの商品属性・アフィリエイトURL・人気根拠・画像の利用証跡まで同じ編集パネルで管理します。Affiliate Operator MCPは経由しません。
+Amazon.co.jp・楽天市場の商品ページと、楽天アフィリエイトの**リンク作成ページ**の右下にボタンを出し、ワンタップで Free Consult の商品カタログへ登録します。最新 v1.2.1 はAmazonの商品属性・アフィリエイトURL・人気根拠・画像の利用証跡まで同じ編集パネルで管理します。Affiliate Operator MCPは経由しません。
 
 - Source: [`scripts/affiliate-db-clipper.user.js`](./scripts/affiliate-db-clipper.user.js)
 - Install / update: https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/affiliate-db-clipper.user.js
@@ -101,7 +101,7 @@ Amazon.co.jp・楽天市場の商品ページと、楽天アフィリエイト�
 - **Amazonの登録項目**
   - ASIN、商品名、正規URL、既存のパンくずカテゴリ階層。
   - ブランド、型番・モデル番号、仕様メモ、編集カテゴリ、紹介文、共通商品ID。
-  - Amazonアソシエイトリンク。Amazon SiteStripeで生成した**フルURL**またはリンクHTMLを貼り付けると、対象ASINと `tag=...-22` を検証して保存します。短縮URL（`amzn.to`）は遷移先ASINをこの場で検証できないため受け付けません。アソシエイトタグのメニュー設定から通常リンクを組み立てる方法も引き続き使えます。
+  - Amazonアソシエイトリンク。Amazon SiteStripeで生成した**フルURL**またはリンクHTMLを貼り付けると、対象ASINと `tag=...-22` を検証して保存します。短縮URL（`amzn.to`）は遷移先ASINをこの場で検証できないため受け付けません。アソシエイトタグのメニュー設定から通常リンクを組み立てる方法も引き続き使えます。 SiteStripeが商品を直接リンク対象外と表示した場合は、自動タグ付けも停止し、保存時に既存の直リンクと広告有効フラグを解除します。
   - 過去1か月の購入表示、星評価、レビュー件数、観測日、根拠URL、説明。ページ上の表示値を手入力し、しきい値表現を実数として扱わない形で保存します。
 - **画像の扱い**
   - Amazon由来のSiteStripe / PA API / Creators API画像URLは恒久DBに保存しません。公式規約では画像リンクの保持は最大24時間で、商品コンテンツの収集・集約にも制約があります。
