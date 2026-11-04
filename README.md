@@ -91,6 +91,34 @@ X と Threads の各投稿のアクション行に **📌** ボタンを追加�
 - **うまく保存できないとき**: Violentmonkeyのメニュー `投稿ストック: 保存先の接続テスト` で確認できます。「JSONではなくHTML」系のエラーは、ほぼデプロイ側の問題です。①デプロイの「アクセスできるユーザー」が「全員」になっているか、②Code.gsを保存した**後**に「デプロイを管理 → 編集 → バージョン: 新バージョン」でデプロイしたか、③保存先URLが `…/dev` ではなく最新デプロイの `…/exec` か、④初回の権限許可を済ませたか。保存先URLをブラウザで開いて `SNS Post Stock is ready` と出れば、デプロイ自体は動いています。
 - **注意**: ウェブアプリURLと `READ_TOKEN` はこのリポジトリに入れません。URLを知っている人は行を追加でき、URLと `READ_TOKEN` の両方を知っている人は保存内容を読めます。`Code.gs` を変更したときは「デプロイを管理」から同じデプロイの新バージョンを作るとURLが変わりません。
 
+### Affiliate DB Clipper（Amazon / 楽天 → Free Consult）
+
+Amazon.co.jp・楽天市場の商品ページと、楽天アフィリエイトの**リンク作成ページ**の右下にボタンを出し、ワンタップで Free Consult（nomuonji/free-consult-blog）の商品カタログに登録します。Affiliate Operator MCPは経由しません。
+
+- Source: [`scripts/affiliate-db-clipper.user.js`](./scripts/affiliate-db-clipper.user.js)
+- Install / update: https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/affiliate-db-clipper.user.js
+- **保存先**: Free Consult Worker の REST API `https://consult.antonbase.com/api/affiliate-intelligence`。Amazonは Firestore `amazon_products`、楽天は Firestore `rakuten_products` に入ります。管理画面（`/intelligence/products/`・`/intelligence/rakuten/`）と同じ検証・リビジョン確認を通るので、Firestoreの鍵はブラウザに置きません。
+- **画像の扱い**（free-consult-blog `docs/SOCIAL_PRODUCT_IMAGE_USAGE.md` に準拠）
+  - Amazon: 画像URLは保存しません。ページから取った画像は正規のAPI経由ではなく、画像URLの保存も24時間が上限だからです。画像は管理画面で扱います。
+  - 楽天の商品ページ: 画像は取りません（商品ページからの取得は禁止）。
+  - 楽天のリンク作成ページ: 生成されたリンクHTMLから、アフィリエイトURLと画像URL（楽天の画像ホストのみ）を保存します。サイトでは、アフィリエイトリンクを公開したときだけ、そのリンクと一緒に画像が出ます。
+- **登録される内容**
+  - Amazon: ASIN、商品名、正規URL（`/dp/ASIN`）、状態 `draft`、パンくずはメモに。アソシエイトタグを設定していれば `affiliateUrl` も保存します。
+  - 楽天の商品ページ: `rakuten-<ショップ>-<商品コード>` のID、商品名、正規URL、状態 `research`、確認日。
+  - 楽天のリンク作成ページ: 上に加えて、アフィリエイトURLと画像。登録済みの商品なら、その行にリンクと画像だけを足します。リンクが複数あるときは、どれを保存するか選べます。
+  - 広告表示（`affiliateEnabled`）と公開は、どちらも管理画面で確認してからONにします。
+- **重複**: 押すとまず既存を確認し、登録済みなら作り直さず編集パネルを開きます。楽天は同じ商品ページの行を一致扱いにします（大文字小文字は無視、移行前からある行も含む）。
+- **編集パネル**: 商品名・カテゴリ（前回の値・最近使った値を候補表示）・紹介文・棚（変な商品／便利な商品）・共通商品ID・状態を更新できます。Amazonと楽天で同じ商品なら、共通商品IDを揃えると1枚のカードにまとまります。紹介文は商品ページの文章を貼らず、自分の言葉で。
+
+#### 初回セットアップ
+
+1. Violentmonkeyメニュー → `アフィDB: 管理者トークンを設定` に、Free Consult管理画面で使っている管理者トークンを入力します（未設定のまま押したときも聞かれます）。Amazonと楽天で共通です。
+2. （任意）`アフィDB: Amazonアソシエイトタグを設定`。
+3. `アフィDB: 接続テスト` で確認します。
+
+- **注意**: トークンはこのブラウザのViolentmonkeyにだけ保存し、このリポジトリには入れません。管理者トークンはFree Consultの管理APIを読み書きできるので、共有端末では使わないでください。401が返ったトークンは自動で消去され、次回入力を求めます。
+- **検証**: Workerの実際のハンドラー（`amazonAdminRequest` / `rakutenAdminRequest`）とメモリ上の偽Firestoreをつないで、登録・既存検知・パネル更新・リンク作成ページからのリンクと画像の追加・複数リンクの選択・楽天以外の画像の除外・公開投影（リンクが無効な間は画像を出さない）・誤トークンを確認しました。楽天の実商品ページでの読み取りも確認済みです。**Amazonの実ページ**（検証環境ではボット判定ページが返る）と、**楽天のリンク作成ページの実画面**（ログインが必要）は未確認です。ボタンが出ないときはコンソールで `__affiliateDbClipperDebug()` を確認してください。
+
 ### X Inline Translator（Chrome組み込みAI）
 
 Xのタイムライン上で投稿を日本語へ翻訳し、選択した英単語・フレーズの日本語訳をポップアップ表示します。既存の `X Lightweight` と併用できます。
@@ -187,6 +215,7 @@ violentmonkey/
 │   ├── sns-post-stock/Code.gs
 │   └── word-stock/Code.gs
 ├── scripts/
+│   ├── affiliate-db-clipper.user.js
 │   ├── bilibili-dual-subtitles.user.js
 │   ├── bilibili-minimal.user.js
 │   ├── chatgpt-lightweight.user.js
