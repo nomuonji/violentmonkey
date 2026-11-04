@@ -93,31 +93,33 @@ X と Threads の各投稿のアクション行に **📌** ボタンを追加�
 
 ### Affiliate DB Clipper（Amazon / 楽天 → Free Consult）
 
-Amazon.co.jp・楽天市場の商品ページと、楽天アフィリエイトの**リンク作成ページ**の右下にボタンを出し、ワンタップで Free Consult（nomuonji/free-consult-blog）の商品カタログに登録します。Affiliate Operator MCPは経由しません。
+Amazon.co.jp・楽天市場の商品ページと、楽天アフィリエイトの**リンク作成ページ**の右下にボタンを出し、ワンタップで Free Consult の商品カタログへ登録します。最新 v1.2.0 はAmazonの商品属性・アフィリエイトURL・人気根拠・画像の利用証跡まで同じ編集パネルで管理します。Affiliate Operator MCPは経由しません。
 
 - Source: [`scripts/affiliate-db-clipper.user.js`](./scripts/affiliate-db-clipper.user.js)
 - Install / update: https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/affiliate-db-clipper.user.js
-- **保存先**: Free Consult Worker の REST API `https://consult.antonbase.com/api/affiliate-intelligence`。Amazonは Firestore `amazon_products`、楽天は Firestore `rakuten_products` に入ります。管理画面（`/intelligence/products/`・`/intelligence/rakuten/`）と同じ検証・リビジョン確認を通るので、Firestoreの鍵はブラウザに置きません。
-- **画像の扱い**（free-consult-blog `docs/SOCIAL_PRODUCT_IMAGE_USAGE.md` に準拠）
-  - Amazon: 画像URLは保存しません。ページから取った画像は正規のAPI経由ではなく、画像URLの保存も24時間が上限だからです。画像は管理画面で扱います。
-  - 楽天の商品ページ: 画像は取りません（商品ページからの取得は禁止）。
-  - 楽天のリンク作成ページ: 生成されたリンクHTMLから、アフィリエイトURLと画像URL（楽天の画像ホストのみ）を保存します。サイトでは、アフィリエイトリンクを公開したときだけ、そのリンクと一緒に画像が出ます。
-- **登録される内容**
-  - Amazon: ASIN、商品名、正規URL（`/dp/ASIN`）、状態 `draft`、パンくずはメモに。アソシエイトタグを設定していれば `affiliateUrl` も保存します。
-  - 楽天の商品ページ: `rakuten-<ショップ>-<商品コード>` のID、商品名、正規URL、状態 `research`、確認日。
-  - 楽天のリンク作成ページ: 上に加えて、アフィリエイトURLと画像。登録済みの商品なら、その行にリンクと画像だけを足します。リンクが複数あるときは、どれを保存するか選べます。
-  - 広告表示（`affiliateEnabled`）と公開は、どちらも管理画面で確認してからONにします。
-- **重複**: 押すとまず既存を確認し、登録済みなら作り直さず編集パネルを開きます。楽天は同じ商品ページの行を一致扱いにします（大文字小文字は無視、移行前からある行も含む）。
-- **編集パネル**: 商品名・カテゴリ（前回の値・最近使った値を候補表示）・紹介文・棚（変な商品／便利な商品）・共通商品ID・状態を更新できます。Amazonと楽天で同じ商品なら、共通商品IDを揃えると1枚のカードにまとまります。紹介文は商品ページの文章を貼らず、自分の言葉で。
+- **保存先**: Free Consult Worker REST API `https://consult.antonbase.com/api/affiliate-intelligence`。Amazonは Firestore `amazon_products`、楽天は Firestore `rakuten_products`。管理画面と同じ検証・リビジョン確認を通り、Firestore鍵はブラウザに置きません。
+- **Amazonの登録項目**
+  - ASIN、商品名、正規URL、既存のパンくずカテゴリ階層。
+  - ブランド、型番・モデル番号、仕様メモ、編集カテゴリ、紹介文、共通商品ID。
+  - Amazonアソシエイトリンク。Amazon SiteStripeで生成した**フルURL**またはリンクHTMLを貼り付けると、対象ASINと `tag=...-22` を検証して保存します。短縮URL（`amzn.to`）は遷移先ASINをこの場で検証できないため受け付けません。アソシエイトタグのメニュー設定から通常リンクを組み立てる方法も引き続き使えます。
+  - 過去1か月の購入表示、星評価、レビュー件数、観測日、根拠URL、説明。ページ上の表示値を手入力し、しきい値表現を実数として扱わない形で保存します。
+- **画像の扱い**
+  - Amazon由来のSiteStripe / PA API / Creators API画像URLは恒久DBに保存しません。公式規約では画像リンクの保持は最大24時間で、商品コンテンツの収集・集約にも制約があります。
+  - 恒久画像として登録できるのは、自主管理ImageKitまたは許諾済みメーカー素材。出典URL・利用条件URL・確認日・Web掲載可否を保存し、未確認画像は公開APIから返しません。
+  - Amazonの商品ページから画像URLをスクレイピングしたり、画像をダウンロード・再ホストしたりしません。SNSへの転用許可も自動では付与しません。
+  - 楽天の商品ページからは画像を取得しません。楽天アフィリエイトのリンク作成ページから生成されたリンクHTMLに含まれる楽天画像のみ、既存の方法で保存します。
+- **公開ゲート**: Amazon広告リンクはサイト登録・開示条件・正しいアソシエイトURLの確認が揃った場合だけ有効化できます。画像は画像利用条件の確認まで公開しません。
+- **重複**: 既存の商品は作り直さず編集パネルを開きます。楽天では同じ商品ページの行を一致扱いにします。Amazonと楽天で同じ商品なら、共通商品IDを揃えると1枚のカードにまとまります。
+- **編集パネル**: Amazonは商品属性、フルアフィリエイトURL、人気根拠、画像出典・利用状態、編集棚を更新できます。楽天は従来どおり商品名・カテゴリ・紹介文・棚・共通商品ID・状態を編集し、リンク作成画面からリンクと画像を追加できます。
 
 #### 初回セットアップ
 
-1. Violentmonkeyメニュー → `アフィDB: 管理者トークンを設定` に、Free Consult管理画面で使っている管理者トークンを入力します（未設定のまま押したときも聞かれます）。Amazonと楽天で共通です。
+1. Violentmonkeyメニュー → `アフィDB: 管理者トークンを設定` に、Free Consult管理画面で使う管理者トークンを入力します。Amazonと楽天で共通です。
 2. （任意）`アフィDB: Amazonアソシエイトタグを設定`。
 3. `アフィDB: 接続テスト` で確認します。
 
-- **注意**: トークンはこのブラウザのViolentmonkeyにだけ保存し、このリポジトリには入れません。管理者トークンはFree Consultの管理APIを読み書きできるので、共有端末では使わないでください。401が返ったトークンは自動で消去され、次回入力を求めます。
-- **検証**: Workerの実際のハンドラー（`amazonAdminRequest` / `rakutenAdminRequest`）とメモリ上の偽Firestoreをつないで、登録・既存検知・パネル更新・リンク作成ページからのリンクと画像の追加・複数リンクの選択・楽天以外の画像の除外・公開投影（リンクが無効な間は画像を出さない）・誤トークンを確認しました。楽天の実商品ページでの読み取りも確認済みです。**Amazonの実ページ**（検証環境ではボット判定ページが返る）と、**楽天のリンク作成ページの実画面**（ログインが必要）は未確認です。ボタンが出ないときはコンソールで `__affiliateDbClipperDebug()` を確認してください。
+- **注意**: トークンはこのブラウザのViolentmonkeyにだけ保存し、このリポジトリには入れません。管理者トークンはFree Consult管理APIを読み書きできるため、共有端末では使わないでください。401が返ったトークンは自動で消去され、次回入力を求めます。
+- **実機確認の範囲**: 拡張機能のAmazon実ページにおける新UI操作とSiteStripeリンクの貼り付けは未確認です。API側の保存・検証はFree ConsultのWorkerテストで確認します。ボタンが出ないときはコンソールで `__affiliateDbClipperDebug()` を確認してください。
 
 ### X Inline Translator（Chrome組み込みAI）
 

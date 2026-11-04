@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Affiliate DB Clipper (Amazon / Rakuten → Free Consult)
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      1.1.0
-// @description  One tap on an Amazon.co.jp / Rakuten Ichiba product page (or the Rakuten Affiliate link-creation page) adds the product to the Free Consult catalog in Affiliate Operator Firestore (amazon_products / rakuten_products) via the Worker REST API.
+// @version      1.2.0
+// @description  Clip Amazon / Rakuten products to Free Consult with affiliate links, structured product metadata, popularity evidence and rights-aware image references.
 // @author       nomuonji
 // @match        https://www.amazon.co.jp/*
 // @match        https://amazon.co.jp/*
@@ -34,7 +34,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.1.0';
+  const VERSION = '1.2.0';
   const API = 'https://consult.antonbase.com/api/affiliate-intelligence';
   const K = {
     adminToken: 'adminToken',
@@ -48,7 +48,7 @@
     '美容・身だしなみ', 'ユニーク雑貨', '文房具', '防災', 'キッチン・生活', '家電・季節用品',
     '美容・スキンケア', '美容家電', 'ペット用品', 'ゲーム・趣味'
   ];
-  const SHELVES = [['odd', '変な商品'], ['useful', '便利な商品']];
+  const SHELVES = [['odd', '変な商品'], ['useful', '便利な商品'], ['popular', '人気・実績']];
   const ROOT_ID = 'adc-root';
   const host = location.hostname;
   const IS_AMAZON = /(^|\.)amazon\.co\.jp$/.test(host);
@@ -146,21 +146,60 @@
     const url = 'https://www.amazon.co.jp/dp/' + asin;
     return { asin, title: title.slice(0, 180), crumbs, url };
   }
+  function amazonSpecialLink(raw, asin) {
+    const text = String(raw || '').trim();
+    if (!text) return '';
+    const candidates = [];
+    if (/<a[\s>]/i.test(text)) {
+      try {
+        const doc = new DOMParser().parseFromString(text, 'text/html');
+        for (const anchor of doc.querySelectorAll('a[href]')) candidates.push(anchor.href);
+      } catch { /* fall through to URL parsing */ }
+    }
+    if (!candidates.length) {
+      const direct = text.match(/https?:\/\/[^\s"'<>]+/i)?.[0] || text;
+      candidates.push(direct.replace(/&amp;/g, '&'));
+    }
+    for (const candidate of candidates) {
+      try {
+        const url = new URL(candidate);
+        const path = url.pathname.replace(/\/$/, '');
+        if (url.protocol === 'https:' && url.hostname === 'www.amazon.co.jp' &&
+          path === '/dp/' + asin && /^[a-z0-9-]{2,50}-22$/.test(url.searchParams.get('tag') || '')) {
+          return url.href;
+        }
+      } catch { /* try next candidate */ }
+    }
+    return '';
+  }
   function amazonPayload(data, edits) {
     const tag = String(GM_getValue(K.associateTag, '') || '').trim();
+    const explicitLink = amazonSpecialLink(edits.affiliateUrl, data.asin);
     const product = {
       asin: data.asin,
       title: data.title,
+      brand: edits.brand || '',
+      modelNumber: edits.modelNumber || '',
+      sourceCategoryPath: data.crumbs || [],
+      specifications: edits.specifications || '',
       category: edits.category || 'そのほか',
       summary: edits.summary || '',
       sourceUrl: data.url,
       status: edits.status || 'draft',
       notes: ('Affiliate DB Clipper v' + VERSION + ' で ' + todayJst() + ' にAmazon商品ページから登録。'
         + (data.crumbs.length ? ' Amazonカテゴリ: ' + data.crumbs.join(' > ') : '')).slice(0, 2000),
-      editorialShelves: edits.shelves || []
+      editorialShelves: edits.shelves || [],
+      popularitySignals: edits.popularitySignals || [],
+      imageUrl: edits.imageUrl || '',
+      imageAlt: edits.imageAlt || data.title,
+      imageSourceType: edits.imageSourceType || '',
+      imageSourceUrl: edits.imageSourceUrl || '',
+      imageUsageStatus: edits.imageUsageStatus || 'unverified',
+      imageUsageCheckedAt: edits.imageUsageCheckedAt || ''
     };
     if (edits.catalogId) product.catalogId = edits.catalogId;
-    if (/^[a-z0-9-]{2,50}-22$/.test(tag)) product.affiliateUrl = data.url + '?tag=' + tag;
+    if (explicitLink) product.affiliateUrl = explicitLink;
+    else if (/^[a-z0-9-]{2,50}-22$/.test(tag)) product.affiliateUrl = data.url + '?tag=' + tag;
     return product;
   }
   const AMAZON_ERRORS = {
@@ -196,8 +235,18 @@
       return r.item;
     },
     async update(d, existing, edits) {
-      const product = { asin: d.asin, title: edits.title, category: edits.category, summary: edits.summary,
-        editorialShelves: edits.shelves, status: edits.status };
+      const product = {
+        asin: d.asin, title: edits.title, brand: edits.brand, modelNumber: edits.modelNumber,
+        sourceCategoryPath: edits.sourceCategoryPath, specifications: edits.specifications,
+        category: edits.category, summary: edits.summary, editorialShelves: edits.shelves,
+        popularitySignals: edits.popularitySignals, status: edits.status,
+        imageUrl: edits.imageUrl, imageAlt: edits.imageAlt,
+        imageSourceType: edits.imageSourceType, imageSourceUrl: edits.imageSourceUrl,
+        imageUsageStatus: edits.imageUsageStatus, imageUsageCheckedAt: edits.imageUsageCheckedAt
+      };
+      const specialLink = amazonSpecialLink(edits.affiliateUrl, d.asin);
+      if (edits.affiliateUrl && !specialLink) throw new Error('AmazonアソシエイトのフルURLを確認してください（対象ASINとtag=...-22が必要。短縮URLは不可）');
+      if (specialLink) product.affiliateUrl = specialLink;
       if (edits.catalogId) product.catalogId = edits.catalogId;
       const r = await amazonApi('POST', '', { action: 'save_amazon_product', product,
         expectedUpdateTime: existing._updateTime });
@@ -368,7 +417,7 @@
  background:#24553f;color:#fff;font:700 13px system-ui,sans-serif;box-shadow:0 3px 12px rgba(0,0,0,.3);margin-left:auto}
 #${ROOT_ID} .adc-btn[data-state=saved]{background:#fff;color:#24553f;outline:2px solid #24553f}
 #${ROOT_ID} .adc-btn[data-state=busy]{opacity:.65;cursor:progress}
-#${ROOT_ID} .adc-panel{width:300px;max-width:86vw;background:#fff;border:1px solid #d5e1d9;border-radius:10px;padding:12px;margin-bottom:8px;
+#${ROOT_ID} .adc-panel{width:340px;max-width:88vw;max-height:76vh;overflow:auto;background:#fff;border:1px solid #d5e1d9;border-radius:10px;padding:12px;margin-bottom:8px;
  box-shadow:0 6px 24px rgba(0,0,0,.25)}
 #${ROOT_ID} .adc-panel label{display:block;margin-top:8px;font-size:12px;color:#546b60}
 #${ROOT_ID} .adc-panel input[type=text],#${ROOT_ID} .adc-panel textarea,#${ROOT_ID} .adc-panel select{width:100%;box-sizing:border-box;padding:5px 7px;
@@ -436,6 +485,111 @@
     ttl.value = record.title || data.title;
     const lt = el('label', {}, '商品名'); lt.append(ttl);
 
+    const amazonFields = {};
+    const amazonExtra = [];
+    if (IS_AMAZON) {
+      const brand = el('input', { type: 'text', maxlength: '120', placeholder: 'ブランド・メーカー名' });
+      brand.value = record.brand || '';
+      const model = el('input', { type: 'text', maxlength: '120', placeholder: '型番・モデル番号' });
+      model.value = record.modelNumber || '';
+      const brandLabel = el('label', {}, 'ブランド・メーカー'); brandLabel.append(brand);
+      const modelLabel = el('label', {}, '型番・モデル番号'); modelLabel.append(model);
+
+      const categoryPath = el('input', { type: 'text', maxlength: '800', placeholder: 'ホーム＆キッチン > 家電 > 暖房器具' });
+      categoryPath.value = (record.sourceCategoryPath || data.crumbs || []).join(' > ');
+      const categoryPathLabel = el('label', {}, '販売ページのカテゴリ階層'); categoryPathLabel.append(categoryPath);
+
+      const specs = el('textarea', { maxlength: '1600', placeholder: '寸法、材質、対応規格、セット内容など。確認した仕様だけを記録。' });
+      specs.value = record.specifications || '';
+      const specsLabel = el('label', {}, '仕様メモ'); specsLabel.append(specs);
+
+      const affiliateUrl = el('textarea', { maxlength: '1600', placeholder: 'SiteStripeで生成したフルURL、またはリンクHTMLを貼り付け' });
+      const storedTag = String(GM_getValue(K.associateTag, '') || '').trim();
+      affiliateUrl.value = record.affiliateUrl || (/^[a-z0-9-]{2,50}-22$/.test(storedTag) ? data.url + '?tag=' + storedTag : '');
+      const affiliateLabel = el('label', {}, 'Amazonアソシエイトリンク（フルURL）');
+      affiliateLabel.append(affiliateUrl);
+      const affiliateHelp = el('div', {}, 'SiteStripeの「リンク生成」でフルリンクをコピーして貼り付けます。amzn.to短縮URLではなく、対象ASINと tag=...-22 を含むURLを使用。HTMLを貼ってもリンク先を取り出します。');
+
+      const purchase = (record.popularitySignals || []).find(x => x.kind === 'amazon_monthly_purchases') || {};
+      const review = (record.popularitySignals || []).find(x => x.kind === 'amazon_review_snapshot') || {};
+      const signalLabel = el('input', { type: 'text', maxlength: '100', placeholder: '例：過去1か月で1,000点以上購入' });
+      signalLabel.value = purchase.label || '';
+      const ratingValue = el('input', { type: 'number', min: '0', max: '5', step: '0.1', placeholder: '例：4.3' });
+      ratingValue.value = review.ratingValue || '';
+      const reviewCount = el('input', { type: 'number', min: '0', step: '1', placeholder: '例：2039' });
+      reviewCount.value = review.reviewCount || '';
+      const signalDate = el('input', { type: 'date' });
+      signalDate.value = purchase.observedAt || review.observedAt || todayJst();
+      const signalUrl = el('input', { type: 'url' });
+      signalUrl.value = purchase.sourceUrl || review.sourceUrl || data.url;
+      const signalExplanation = el('textarea', { maxlength: '500', placeholder: '表示値の意味・条件など（例：販売個数の実数ではなくAmazon表示のしきい値）' });
+      signalExplanation.value = purchase.explanation || review.explanation || '';
+      const signalLabelField = el('label', {}, '購入実績の表示'); signalLabelField.append(signalLabel);
+      const ratingLabel = el('label', {}, '星評価（任意）'); ratingLabel.append(ratingValue);
+      const reviewCountLabel = el('label', {}, 'レビュー件数（任意）'); reviewCountLabel.append(reviewCount);
+      const signalDateLabel = el('label', {}, '観測日'); signalDateLabel.append(signalDate);
+      const signalUrlLabel = el('label', {}, '根拠URL'); signalUrlLabel.append(signalUrl);
+      const signalExplanationLabel = el('label', {}, '指標の説明'); signalExplanationLabel.append(signalExplanation);
+      const signalHelp = el('div', {}, 'Amazonページに表示された値を手入力します。画面上のしきい値表示を実数と誤認しないよう、原文を残してください。');
+
+      const imageUrl = el('input', { type: 'url', placeholder: 'https://ik.imagekit.io/... または許諾済みメーカーURL' });
+      imageUrl.value = record.imageUrl || '';
+      const imageAlt = el('input', { type: 'text', maxlength: '180', placeholder: '商品画像の説明' });
+      imageAlt.value = record.imageAlt || data.title;
+      const imageSourceType = el('select');
+      for (const [value, label] of [['', '未設定'], ['owner-imagekit', '自主管理ImageKit'], ['manufacturer-authorized', '利用許諾済みメーカー素材']]) {
+        imageSourceType.append(el('option', { value }, label));
+      }
+      if (record.imageSourceType && ![...imageSourceType.options].some(x => x.value === record.imageSourceType)) {
+        imageSourceType.append(el('option', { value: record.imageSourceType }, record.imageSourceType + '（旧データ）'));
+      }
+      imageSourceType.value = record.imageSourceType || '';
+      const imageSourceUrl = el('input', { type: 'url', placeholder: 'メーカーのメディアキット・利用条件などのURL' });
+      imageSourceUrl.value = record.imageSourceUrl || '';
+      const imageUsageStatus = el('select');
+      for (const [value, label] of [['unverified', '未確認（公開しない）'], ['site-authorized', '自サイト掲載を確認済み'], ['rejected', '利用不可'], ['legacy', '旧データ（要差し替え）']]) {
+        imageUsageStatus.append(el('option', { value }, label));
+      }
+      imageUsageStatus.value = record.imageUsageStatus || ((record.imageUrl || record.imageSourceType) ? 'legacy' : 'unverified');
+      const imageUsageCheckedAt = el('input', { type: 'date' });
+      imageUsageCheckedAt.value = record.imageUsageCheckedAt || '';
+      const imageUrlLabel = el('label', {}, '恒久保存する画像URL'); imageUrlLabel.append(imageUrl);
+      const imageAltLabel = el('label', {}, '画像の説明'); imageAltLabel.append(imageAlt);
+      const imageSourceTypeLabel = el('label', {}, '画像出典種別'); imageSourceTypeLabel.append(imageSourceType);
+      const imageSourceUrlLabel = el('label', {}, '画像出典・利用条件URL'); imageSourceUrlLabel.append(imageSourceUrl);
+      const imageUsageStatusLabel = el('label', {}, 'Web掲載の利用状態'); imageUsageStatusLabel.append(imageUsageStatus);
+      const imageUsageDateLabel = el('label', {}, '利用条件の確認日'); imageUsageDateLabel.append(imageUsageCheckedAt);
+      const imageHelp = el('div', {}, 'Amazon商品画像（SiteStripe / PA API / Creators API）のURLは長期保存しません。恒久DBには、自主管理ImageKitか利用許諾済みメーカー素材だけを登録してください。許諾未確認の画像は公開投影されません。');
+
+      amazonFields.brand = brand;
+      amazonFields.modelNumber = model;
+      amazonFields.sourceCategoryPath = categoryPath;
+      amazonFields.specifications = specs;
+      amazonFields.affiliateUrl = affiliateUrl;
+      amazonFields.purchaseSignalLabel = signalLabel;
+      amazonFields.ratingValue = ratingValue;
+      amazonFields.reviewCount = reviewCount;
+      amazonFields.signalObservedAt = signalDate;
+      amazonFields.signalSourceUrl = signalUrl;
+      amazonFields.signalExplanation = signalExplanation;
+      amazonFields.imageUrl = imageUrl;
+      amazonFields.imageAlt = imageAlt;
+      amazonFields.imageSourceType = imageSourceType;
+      amazonFields.imageSourceUrl = imageSourceUrl;
+      amazonFields.imageUsageStatus = imageUsageStatus;
+      amazonFields.imageUsageCheckedAt = imageUsageCheckedAt;
+      amazonExtra.push(
+        brandLabel, modelLabel, categoryPathLabel, specsLabel,
+        el('div', {}, 'Amazonアソシエイトリンク'), affiliateHelp, affiliateLabel,
+        el('div', {}, '人気・実績データ'), signalLabelField,
+        el('div', {}, '評価スナップショット（売上個数とは別の指標）'),
+        ratingLabel, reviewCountLabel, signalDateLabel, signalUrlLabel, signalExplanationLabel, signalHelp,
+        el('div', {}, '画像素材・利用条件'), imageHelp,
+        imageUrlLabel, imageAltLabel, imageSourceTypeLabel, imageSourceUrlLabel,
+        imageUsageStatusLabel, imageUsageDateLabel
+      );
+    }
+
     const listId = 'adc-cats';
     const cat = el('input', { type: 'text', list: listId });
     cat.value = record.category || '';
@@ -488,6 +642,62 @@
         catalogId: clean(cid.value),
         status: st.value
       };
+      if (IS_AMAZON) {
+        const f = amazonFields;
+        const purchaseLabel = clean(f.purchaseSignalLabel.value).slice(0, 100);
+        const rating = f.ratingValue.value === '' ? null : Number(f.ratingValue.value);
+        const reviews = f.reviewCount.value === '' ? null : Number(f.reviewCount.value);
+        const observedAt = f.signalObservedAt.value || todayJst();
+        const sourceUrl = f.signalSourceUrl.value.trim() || data.url;
+        const explanation = String(f.signalExplanation.value || '').trim().slice(0, 500);
+        const signals = (record.popularitySignals || []).filter(x =>
+          !['amazon_monthly_purchases', 'amazon_review_snapshot'].includes(x.kind));
+        if (purchaseLabel) signals.push({
+          kind: 'amazon_monthly_purchases', label: purchaseLabel, position: null,
+          observedAt, sourceUrl, explanation
+        });
+        if (rating !== null || reviews !== null) signals.push({
+          kind: 'amazon_review_snapshot',
+          label: '星評価 ' + (rating === null ? '未確認' : rating.toFixed(1)) +
+            ' / レビュー ' + (reviews === null ? '未確認' : reviews.toLocaleString('ja-JP')) + '件',
+          ratingValue: rating, reviewCount: reviews, position: null,
+          observedAt, sourceUrl,
+          explanation: explanation || 'Amazon商品ページに表示された評価・レビュー数。販売個数ではない。'
+        });
+        edits.brand = clean(f.brand.value).slice(0, 120);
+        edits.modelNumber = clean(f.modelNumber.value).slice(0, 120);
+        edits.sourceCategoryPath = f.sourceCategoryPath.value.split(/[>＞]/).map(x => clean(x).slice(0, 100)).filter(Boolean).slice(0, 16);
+        edits.specifications = String(f.specifications.value || '').trim().slice(0, 1600);
+        edits.affiliateUrl = f.affiliateUrl.value.trim();
+        edits.popularitySignals = signals.slice(0, 8);
+        edits.imageUrl = f.imageUrl.value.trim();
+        edits.imageAlt = clean(f.imageAlt.value).slice(0, 180);
+        edits.imageSourceType = f.imageSourceType.value;
+        edits.imageSourceUrl = f.imageSourceUrl.value.trim();
+        edits.imageUsageStatus = f.imageUsageStatus.value;
+        edits.imageUsageCheckedAt = f.imageUsageCheckedAt.value;
+        if (edits.affiliateUrl && !amazonSpecialLink(edits.affiliateUrl, data.asin)) {
+          msg.className = 'adc-msg err';
+          msg.textContent = 'AmazonアソシエイトのフルURLを確認してください。対象ASINと tag=...-22 が必要です（amzn.to短縮URLは非対応）。';
+          return;
+        }
+        if (edits.imageUrl && !['owner-imagekit', 'manufacturer-authorized'].includes(edits.imageSourceType)) {
+          msg.className = 'adc-msg err';
+          msg.textContent = '恒久DBには自主管理ImageKitまたは利用許諾済みメーカー画像のみ登録できます。';
+          return;
+        }
+        if (edits.imageUsageStatus === 'site-authorized' &&
+          (!edits.imageUrl || !edits.imageSourceUrl || !edits.imageUsageCheckedAt)) {
+          msg.className = 'adc-msg err';
+          msg.textContent = '画像を公開するには、画像URL・出典/利用条件URL・確認日が必要です。';
+          return;
+        }
+        if (edits.shelves.includes('popular') && !signals.length) {
+          msg.className = 'adc-msg err';
+          msg.textContent = '人気・実績の棚には、購入表示または評価・レビューなどの根拠が必要です。';
+          return;
+        }
+      }
       if (edits.catalogId && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(edits.catalogId)) {
         msg.className = 'adc-msg err'; msg.textContent = '共通商品IDは半角英小文字・数字・ハイフンのみ'; return;
       }
@@ -510,7 +720,7 @@
       } finally { state.busy = false; save.disabled = false; }
     };
 
-    panel.append(lt, lc, ls, lsh, lcid, lst, row, msg);
+    panel.append(lt, ...amazonExtra, lc, ls, lsh, lcid, lst, row, msg);
     state.root.prepend(panel);
     state.panel = panel;
   }
