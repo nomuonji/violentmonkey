@@ -1,0 +1,32 @@
+name: Validate Userscripts
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'scripts/**/*.user.js'
+      - '.github/workflows/validate-userscripts.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/**/*.user.js'
+      - '.github/workflows/validate-userscripts.yml'
+
+jobs:
+  syntax-check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check every userscript parses
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r file; do
+            echo "Checking $file"
+            node --check "$file"
+          done < <(find scripts -type f -name '*.user.js' -print | sort)
