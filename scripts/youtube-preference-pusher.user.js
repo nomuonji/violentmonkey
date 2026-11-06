@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Preference Pusher
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      1.2.0
+// @version      1.2.1
 // @description  YouTubeのおすすめを自分の好み（手動リスト＋高評価・再生リスト・登録チャンネルからの学習）で採点し、並べ替え・薄表示・好み枠の差し込み・ワンクリックの「興味なし」送信を行います。
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -27,7 +27,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.2.0';
+  const VERSION = '1.2.1';
   const NS = 'ypp';
 
   // ======================================================================
@@ -39,6 +39,7 @@
     surfaceHome: true,
     surfaceWatch: true,
     surfaceSearch: true,
+    surfaceHistory: true,
     reorderHome: true,
     reorderWatch: true,
     boostAt: 1.5,          // これ以上は「好み」として強調・上へ
@@ -1235,6 +1236,7 @@
   // ---- カードの読み取り ----------------------------------------------------
   const SELECTORS = {
     home: 'ytd-browse[page-subtype="home"] ytd-rich-item-renderer',
+    history: 'ytd-browse[page-subtype="history"] ytd-video-renderer, ytd-browse[page-subtype="history"] yt-lockup-view-model',
     watch: '#related ytd-compact-video-renderer, #related yt-lockup-view-model',
     search: 'ytd-search ytd-video-renderer, ytd-search yt-lockup-view-model',
   };
@@ -1242,6 +1244,7 @@
   function getSurface() {
     const p = location.pathname;
     if (p === '/' || p === '') return 'home';
+    if (p === '/feed/history') return 'history';
     if (p === '/watch') return 'watch';
     if (p === '/results') return 'search';
     return '';
@@ -1249,7 +1252,7 @@
 
   function surfaceOn(surface) {
     const s = state.settings;
-    return s.enabled && ((surface === 'home' && s.surfaceHome) || (surface === 'watch' && s.surfaceWatch) || (surface === 'search' && s.surfaceSearch));
+    return s.enabled && ((surface === 'home' && s.surfaceHome) || (surface === 'watch' && s.surfaceWatch) || (surface === 'search' && s.surfaceSearch) || (surface === 'history' && s.surfaceHistory));
   }
 
   function videoIdFromHref(href) {
@@ -1341,7 +1344,7 @@
 
   const CLASS_LIST = ['ypp-boost', 'ypp-dim', 'ypp-hidden', 'ypp-neutral'];
 
-  function decorate(el, info, r, cls) {
+  function decorate(el, info, r, cls, surface) {
     el.classList.add('ypp-card');
     for (const c of CLASS_LIST) el.classList.toggle(c, c === 'ypp-' + cls);
     let ui = el.querySelector(':scope > .ypp-ui');
@@ -1349,11 +1352,11 @@
       ui = h('div', { class: 'ypp-ui' });
       el.append(ui);
     }
-    const key = `${info.videoId}|${state.version}|${cls}|${state.settings.showChips}`;
+    const key = `${surface}|${info.videoId}|${state.version}|${cls}|${state.settings.showChips}`;
     if (ui.dataset.key === key) return;
     ui.dataset.key = key;
     clear(ui);
-    const showChip = state.settings.showChips === 'all' || (state.settings.showChips === 'marked' && (cls === 'boost' || cls === 'dim'));
+    const showChip = surface !== 'history' && (state.settings.showChips === 'all' || (state.settings.showChips === 'marked' && (cls === 'boost' || cls === 'dim')));
     if (showChip) {
       ui.append(h('span', { class: 'ypp-chip ypp-chip-' + cls, title: r.reasons.join('\n') || '好み要素なし' },
         (cls === 'boost' ? '★ ' : '') + fmt(r.score)));
@@ -1363,11 +1366,14 @@
       onclick: (ev) => { ev.preventDefault(); ev.stopPropagation(); fn(); },
       onmousedown: (ev) => ev.stopPropagation(),
     }, label);
-    ui.append(h('span', { class: 'ypp-acts' },
-      btn('👍', '好み：このチャンネルとタイトルの傾向を上げる', () => feedbackLike(info)),
-      btn('👎', '興味なし：傾向を下げ、YouTubeにも「興味なし」を送る', () => feedbackDislike(el, info)),
-      btn('🚫', 'このチャンネルをNGに追加し、YouTubeにも「チャンネルをおすすめに表示しない」を送る', () => feedbackBlock(el, info)),
-    ));
+    const actions = [btn('👍', '好み：このチャンネルとタイトルの傾向を上げる', () => feedbackLike(info))];
+    if (surface !== 'history') {
+      actions.push(
+        btn('👎', '興味なし：傾向を下げ、YouTubeにも「興味なし」を送る', () => feedbackDislike(el, info)),
+        btn('🚫', 'このチャンネルをNGに追加し、YouTubeにも「チャンネルをおすすめに表示しない」を送る', () => feedbackBlock(el, info)),
+      );
+    }
+    ui.append(h('span', { class: 'ypp-acts' }, ...actions));
   }
 
   function undecorate(el) {
@@ -1452,11 +1458,11 @@
       if (el.tagName === 'YT-LOCKUP-VIEW-MODEL' && el.closest('ytd-rich-item-renderer, ytd-compact-video-renderer, ytd-video-renderer')) continue;
       const info = readCard(el);
       if (!info) continue;
-      if (surface !== 'search') observeBg(info);
+      if (surface !== 'search' && surface !== 'history') observeBg(info);
       const r = scoreOf(info);
-      let cls = classify(r, state.settings);
+      let cls = surface === 'history' ? 'neutral' : classify(r, state.settings);
       if (surface === 'search' && cls === 'dim') cls = 'neutral'; // 検索は自分で探しているので薄くしない
-      decorate(el, info, r, cls);
+      decorate(el, info, r, cls, surface);
       if ((reorderOn || surface === 'home') && !el.closest('ytd-rich-section-renderer')) {
         const parent = el.parentElement;
         if (!groups.has(parent)) groups.set(parent, []);
@@ -1900,6 +1906,7 @@
         h('div', { class: 'ypp-label' }, '対象'),
         checkInput('surfaceHome', 'ホーム'),
         checkInput('reorderHome', '　ホームを好み順に並べ替える（読み込まれた塊ごと）'),
+        checkInput('surfaceHistory', '再生履歴（👍 の好み学習ボタン）'),
         checkInput('surfaceWatch', '動画ページの関連動画'),
         checkInput('reorderWatch', '　関連動画を好み順に並べ替える'),
         checkInput('surfaceSearch', '検索結果（NG非表示と採点表示のみ。薄くはしない）')),
