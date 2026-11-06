@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         YouTube Preference Pusher
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      1.2.1
-// @description  YouTubeのおすすめを自分の好み（手動リスト＋高評価・再生リスト・登録チャンネルからの学習）で採点し、並べ替え・薄表示・好み枠の差し込み・ワンクリックの「興味なし」送信を行います。
+// @version      1.2.2
+// @description  YouTubeのおすすめを自分の好みで採点。カードの👍はクリック時にYouTubeへ高評価を送り、同時に好みを学習します。
 // @author       nomuonji
 // @match        https://www.youtube.com/*
 // @run-at       document-idle
@@ -17,7 +17,7 @@
 
 /*
  * 方針
- * - YouTube側を自動操作で「調教」することはしない（自動再生・自動高評価はしない）。
+ * - 自動再生・自動高評価はしない。カードの👍をユーザーが押した場合に限り、高評価を送る。
  * - 画面に出てきたおすすめを自分のルールで採点し、上げる／薄くする／隠す。
  * - 好きなチャンネルの新着やキーワード検索の結果を「好み枠」としてホームに差し込む。
  * - 「興味なし」「チャンネルをおすすめに表示しない」は、ユーザーがボタンを押したときだけ送る。
@@ -27,7 +27,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.2.1';
+  const VERSION = '1.2.2';
   const NS = 'ypp';
 
   // ======================================================================
@@ -1366,7 +1366,7 @@
       onclick: (ev) => { ev.preventDefault(); ev.stopPropagation(); fn(); },
       onmousedown: (ev) => ev.stopPropagation(),
     }, label);
-    const actions = [btn('👍', '好み：このチャンネルとタイトルの傾向を上げる', () => feedbackLike(info))];
+    const actions = [btn('👍', 'YouTubeに高評価を送信し、好みデータにも加点する', () => feedbackLike(el, info))];
     if (surface !== 'history') {
       actions.push(
         btn('👎', '興味なし：傾向を下げ、YouTubeにも「興味なし」を送る', () => feedbackDislike(el, info)),
@@ -1504,11 +1504,32 @@
     rebuild(); rescoreAll();
   }
 
-  function feedbackLike(info) {
+  async function feedbackLike(el, info) {
+    let sent = false;
+    let failure = '';
+    try {
+      // ユーザーがカードの👍を押したときだけ、ログイン中のYouTubeアカウントへ高評価を送る。
+      const response = await innertube('like/like', { target: { videoId: info.videoId } }, { auth: true });
+      if (response && response.error) throw new Error(response.error.message || response.error.status || 'YouTube側で拒否されました');
+      const mutations = response && response.frameworkUpdates && response.frameworkUpdates.entityBatchUpdate && response.frameworkUpdates.entityBatchUpdate.mutations;
+      const likeEntity = Array.isArray(mutations) && mutations.map((m) => m.payload && m.payload.likeStatusEntity).find(Boolean);
+      if (likeEntity && likeEntity.likeStatus && likeEntity.likeStatus !== 'LIKE') {
+        throw new Error(`高評価状態を確認できませんでした（${likeEntity.likeStatus}）`);
+      }
+      sent = true;
+    } catch (e) {
+      failure = e && e.message ? e.message : String(e);
+    }
+
+    // ローカルの好み学習は、YouTube送信の成否にかかわらず明示的な👍操作として記録する。
     addDoc(state.fb.pos, info.tokens, 2);
     bumpChannel(info, 1);
     saveFb();
-    toast(`👍 「${info.channelName || info.title}」の傾向を上げました`, 'ok');
+    if (sent) {
+      toast(`👍 YouTubeに高評価を送り、${info.channelName || info.title}を好みとして学習しました`, 'ok', 5000);
+    } else {
+      toast(`YouTubeへの高評価送信に失敗しました（${failure}）。好みデータには加点しました`, 'warn', 6500);
+    }
   }
 
   async function feedbackDislike(el, info) {
