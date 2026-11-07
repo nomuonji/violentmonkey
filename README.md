@@ -60,36 +60,26 @@ Language Reactorの字幕で、覚えたい英単語を **Alt+クリック**（M
 
 ### SNS Post Stock（X / Threads 投稿ストック）
 
-X と Threads の各投稿のアクション行に **📌** ボタンを追加し、ワンタップでGoogleスプレッドシートに投稿を保存します。保存したデータは、エージェントが後で分析できるよう構造化JSONでも格納します。
+X と Threads の各投稿アクション行に **📌** ボタンを追加し、ワンタップでNotionの恒久保存DBへ直接保存します。Google Apps Script / Google Sheets は経由しません。
 
 - Source: [`scripts/sns-post-stock.user.js`](./scripts/sns-post-stock.user.js)
 - Install / update: https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/sns-post-stock.user.js
-- 受け口: [`apps-script/sns-post-stock/Code.gs`](./apps-script/sns-post-stock/Code.gs)（Word Stockとは別のスプレッドシート・別デプロイ）
-- **対象**: `x.com` / `twitter.com` / `www.threads.com`（旧 `threads.net` も可）。タイムライン・検索・プロフィール・投稿詳細のどこでも、PC・スマホ（Violentmonkey対応ブラウザ）で使えます。
-- **操作**: 📌 を押すと保存して ✓ に変わります。保存済みの投稿をもう一度押すと、新しい行は作らず数値（いいね等）を更新し、その時点の数値をスナップショットとして追記します。
-- **タグ**: 📌 に**ホバー**（PC）または**長押し**（スマホ）でタグパネルが開きます。
-  - 未保存の投稿でタグを1つ押すと、**そのタグ付きで保存**します（ワンタップのまま）。
-  - 保存済みなら、タグを押すたびに付け外しします（緑＝付いている）。ボタンの `✓#2` は付いているタグの数です。
-  - 入力欄は既存タグの絞り込みを兼ねています。一致するタグがなければ `＋ 新しいタグ` が出て、押すか Enter で追加できます。
-  - 候補は「最近使ったタグ → シート全体でよく使われているタグ」の順に最大16個表示します。一覧はシートから取得します（10分キャッシュ）。シートで手入力したタグも候補に出ます。
-  - スマホには長押しのほかに、📌をタップして保存した直後にもパネルが5秒間出ます（触らなければ自動で閉じ、スクロールでも閉じます）。
-- **シートの列**（シート名「投稿」）: 保存日時 / SNS / 投稿者 / ハンドル / 本文 / 投稿日時 / いいね / リポスト / 返信 / 引用 / ブックマーク / 表示 / シェア / メディア数 / リンク / 回数 / 最終保存 / タグ / メモ / JSON。タグは `タグ1, タグ2` の形式で、パネルからでもシートの手入力でも編集できます。**メモは手で自由に記入**でき、どちらも再保存で上書きされません。キー列（`x:123…` / `threads:Cxyz…`）は非表示列です。
-- **JSON列（エージェント向けの正データ）**: `platform, postId, url, author{name,handle}, text, lang, createdAt, metrics{likes,reposts,replies,quotes,bookmarks,views,shares}, media[{type,url,alt,poster}], links[{text,url,card}], quoted{author,text,createdAt,url}, truncated, context（Xの「〜さんがリポスト」等）, isReply, rawText（Threadsのみ）, savedFrom, firstSavedAt, lastSavedAt, saveCount, snapshots[{at,metrics}]（最大30件）, scriptVersion`。画面に表示されていない数値は入りません（例: Xの引用数、Threadsの表示数）。
-- **エージェントからの読み出し**: Apps Script の「スクリプト プロパティ」に `READ_TOKEN`（長いランダム文字列）を設定すると、`GET <ウェブアプリURL>?action=list&token=…` で保存済み投稿をJSONで取得できます（`&platform=x|threads`、`&tag=タグ名`、`&since=2026-11-01`（最終保存日時）、`&limit=200`（最大2000））。1件は `?action=get&token=…&key=x:123…`、タグ一覧（件数つき）は `?action=tags&token=…`。各itemの `tags` はタグ名の配列です（v1.1.0から。v1.0.0は文字列でした）。`READ_TOKEN` 未設定の間は読み出しAPIは無効です。スプレッドシート自体をGoogle Drive経由で読ませても構いません。
-- **注意（本文）**: Xのタイムラインで「さらに表示」になっている長文は省略された本文までしか取れません（`truncated: true`、トーストでもお知らせ）。投稿詳細を開いてもう一度押すと全文で上書きされます。
-- **注意（Threads）**: ThreadsのDOMはクラス名が難読化されているため、本文は `span[dir=auto]` からの推定です。取りこぼしや「翻訳を見る」等の混入に備えて、表示テキスト全体を `rawText` にも保存しています。メディアURL（X・ThreadsのCDN）は期限切れになることがあります。
-- **検証**: 構文チェック、モックDOMでのX/Threads抽出（本文・絵文字・省略URL復元・数値の「1.2K」「1.2万」変換・引用・リンク展開）、Apps Scriptのモックでの重複更新・スナップショット・読み出しAPI・数式インジェクション防止、タグパネル（ホバーで開く・タグ選択で保存・付け外し・新規追加・タッチ保存後の自動表示・外側タップで閉じる）とタグのAPIを確認済み。**実際のX/Threadsページでの動作確認は未実施**です。ボタンが出ない・値が空のときは、コンソールで `__snsPostStockDebug()` の結果を見ると切り分けられます。
-
-#### 初回セットアップ
-
-1. 新しいGoogleスプレッドシートを作り、`拡張機能 > Apps Script` を開く。
-2. `Code.gs` の中身を [`apps-script/sns-post-stock/Code.gs`](./apps-script/sns-post-stock/Code.gs) で置き換えて保存。
-3. （エージェントに読ませる場合）`プロジェクトの設定 > スクリプト プロパティ` に `READ_TOKEN` を追加。
-4. `デプロイ > 新しいデプロイ` → 種類「ウェブアプリ」、実行するユーザー「自分」、アクセスできるユーザー「全員」でデプロイし、表示された権限を許可。
-5. ウェブアプリURL（`…/exec`）をコピーし、XかThreadsでViolentmonkeyのメニュー → `投稿ストック: 保存先URLを設定` に貼り付け（未設定のまま初めて📌を押したときも聞かれます）。保存先URLはXとThreadsで共通です。
-
-- **うまく保存できないとき**: Violentmonkeyのメニュー `投稿ストック: 保存先の接続テスト` で確認できます。「JSONではなくHTML」系のエラーは、ほぼデプロイ側の問題です。①デプロイの「アクセスできるユーザー」が「全員」になっているか、②Code.gsを保存した**後**に「デプロイを管理 → 編集 → バージョン: 新バージョン」でデプロイしたか、③保存先URLが `…/dev` ではなく最新デプロイの `…/exec` か、④初回の権限許可を済ませたか。保存先URLをブラウザで開いて `SNS Post Stock is ready` と出れば、デプロイ自体は動いています。
-- **注意**: ウェブアプリURLと `READ_TOKEN` はこのリポジトリに入れません。URLを知っている人は行を追加でき、URLと `READ_TOKEN` の両方を知っている人は保存内容を読めます。`Code.gs` を変更したときは「デプロイを管理」から同じデプロイの新バージョンを作るとURLが変わりません。
+- 保存先: [Notion — SNS Post Archive](https://app.notion.com/p/a94abaa6d2c841528c42aa4f3c08c4f5)（Postsページ配下）
+- **対象**: `x.com` / `twitter.com` / `www.threads.com`（旧 `threads.net` も可）。タイムライン・検索・プロフィール・投稿詳細のどこでも使えます。
+- **操作**: 📌 を押すとNotionへ保存して ✓ に変わります。同じ投稿を再保存した場合は新しい行を作らず、既存レコードの本文・数値を更新し、最大30件のエンゲージメント推移を保持します。
+- **タグ**: 📌 にホバー（PC）または長押し（スマホ）でタグパネルが開きます。未保存の投稿はタグを選びながら保存でき、保存済み投稿はタグの付け外しができます。既存タグ候補はNotionの直近最大1,000投稿から使用頻度を集計し、10分間ローカルキャッシュします。
+- **Notionの保存項目**: 投稿者名・ハンドル・本文・投稿日時・投稿URL・SNS・いいね・リポスト・返信・引用・ブックマーク・表示・シェア・メディア数・メディアJSON・リンクJSON・保存元URL・初回/最終保存日時・保存回数・タグ・メモ・メトリクス履歴・Full Payload・本文省略フラグ。
+- **重複判定**: `Platform:Post ID` をキーにNotionのData Sourceを検索します。再保存では既存メモ・タグを維持し、30件を超えたスナップショットは古いものから整理します。
+- **初回セットアップ**:
+  1. [SNS Post Archive](https://app.notion.com/p/a94abaa6d2c841528c42aa4f3c08c4f5) を開き、Notion API integration（既存のNotion API tokenに対応するintegration）にデータベースへのアクセス権を付与します。親ページからアクセスが継承されていれば追加操作は不要です。
+  2. 上のInstall / updateリンクを開き、Violentmonkeyにインストールします。
+  3. XまたはThreadsでViolentmonkeyのメニュー → `投稿ストック: Notion API token を設定` を選び、Notionの `Posts > notion api` に保管しているIntegration Secretを入力します。tokenはViolentmonkeyのローカルスクリプトストレージにのみ保存します。
+  4. メニュー → `投稿ストック: Notion 接続テスト` を実行し、`Notion接続OK` を確認します。
+- **シークレットの扱い**: tokenはuserscriptのソースコード・README・GitHubには含めません。ブラウザ内のViolentmonkeyストレージに平文で保持するため、そのブラウザプロファイルや拡張機能自体が侵害された場合はtokenも読み取られる可能性があります。不要になったらメニューの `Notion API token を削除` でローカル設定から削除できます。integration側のアクセス範囲は必要なNotionページだけに限定してください。
+- **読み出し**: 専用の読み出しAPI tokenは不要です。エージェントからの検索・分析はNotion DB / Notion MCPを直接利用します。
+- **本文の注意**: Xのタイムラインで「さらに表示」になっている長文は省略された本文までしか取れません（`Truncated: true`）。投稿詳細を開いて再保存すると全文で更新します。
+- **Threadsの注意**: ThreadsのDOMは難読化されているため、本文は `span[dir=auto]` から抽出し、表示テキスト全体も `rawText` に保存します。メディアURL（X・ThreadsのCDN）は期限切れになる場合があります。
+- **既存シートのデータ**: 旧Google Sheetsに保存済みの投稿は自動移行しません。既存データはそのまま残し、新しい保存からNotionに記録します。
 
 ### Affiliate DB Clipper（Amazon / 楽天 → Free Consult）
 
@@ -214,7 +204,6 @@ Stylus バックアップ内にも X Lightweight が含まれていましたが�
 ```text
 violentmonkey/
 ├── apps-script/
-│   ├── sns-post-stock/Code.gs
 │   └── word-stock/Code.gs
 ├── scripts/
 │   ├── affiliate-db-clipper.user.js
