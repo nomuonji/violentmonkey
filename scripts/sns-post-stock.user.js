@@ -34,6 +34,7 @@
 
   // ---- Settings / Notion API ---------------------------------------------
   const TOKEN_KEY = 'notionApiToken';
+  const DATABASE_ID = 'a94abaa6-d2c8-4152-8c42-aa4f3c08c4f5';
   const DATA_SOURCE_ID = '5582b90f-2cb8-40f5-8656-a1c7fbc37b38';
   const NOTION_VERSION = '2026-03-11';
   const SAVED_KEY = 'savedKeys';
@@ -957,7 +958,7 @@
         result = await notionRequest('PATCH', '/pages/' + existing.id, { properties });
       } else {
         result = await notionRequest('POST', '/pages', {
-          parent: { type: 'data_source_id', data_source_id: DATA_SOURCE_ID },
+          parent: { database_id: DATABASE_ID },
           properties
         });
       }
