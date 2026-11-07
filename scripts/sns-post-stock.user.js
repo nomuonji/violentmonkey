@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         SNS Post Stock (X / Threads)
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      1.1.1
-// @description  One tap on 📌 saves (hover / long-press for tags) an X / Threads post (text, author, metrics, media, links) to a Google Spreadsheet for later analysis.
+// @version      1.2.0
+// @description  One tap on 📌 saves X / Threads posts directly to a Notion database (text, author, metrics, media, links and tags).
 // @author       nomuonji
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -16,51 +16,57 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
-// @connect      script.google.com
-// @connect      script.googleusercontent.com
+// @connect      api.notion.com
 // @noframes
 // @updateURL    https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/sns-post-stock.user.js
 // @downloadURL  https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/sns-post-stock.user.js
 // ==/UserScript==
 
 /*
- * Receiver: apps-script/sns-post-stock/Code.gs (deploy as a Google Apps Script web app).
- * The web app URL is stored only in Violentmonkey's script storage, never in
- * this public repository.
+ * Direct receiver: Notion API (no Google Apps Script / Sheets intermediary).
+ * The integration token is stored only in Violentmonkey's local script storage;
+ * it is never embedded in this source file or committed to the repository.
  */
 (() => {
   'use strict';
 
-  const VERSION = '1.1.1';
-  const URL_KEY = 'webAppUrl';
+  const VERSION = '1.2.0';
+
+  // ---- Settings / Notion API ---------------------------------------------
+  const TOKEN_KEY = 'notionApiToken';
+  const DATA_SOURCE_ID = '5582b90f-2cb8-40f5-8656-a1c7fbc37b38';
+  const NOTION_VERSION = '2026-03-11';
   const SAVED_KEY = 'savedKeys';
   const MAX_SAVED_KEYS = 5000;
   const BTN_CLASS = 'sps-btn';
   const TOAST_ID = 'sps-toast';
   const IS_X = /(^|\.)(x|twitter)\.com$/.test(location.hostname);
 
-  // ---- Settings ----------------------------------------------------------
-  function getWebAppUrl() {
-    return String(GM_getValue(URL_KEY, '') || '').trim();
+  function getNotionToken() {
+    return String(GM_getValue(TOKEN_KEY, '') || '').trim();
   }
 
-  function promptWebAppUrl() {
+  function promptNotionToken() {
     const value = window.prompt(
-      'Google Apps Script のウェブアプリURL（…/exec）を貼り付けてください',
-      getWebAppUrl()
+      'Notion API integration token を入力してください（このブラウザのViolentmonkey内だけに保存されます）',
+      getNotionToken()
     );
     if (value === null) return false;
-    const url = value.trim();
-    if (url && !/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec(\?.*)?$/.test(url)) {
-      toast('URLの形式が違います（https://script.google.com/macros/s/…/exec）', 'error');
+    const token = value.trim();
+    if (token && !/^(ntn_|secret_)[A-Za-z0-9_-]{20,}$/.test(token)) {
+      toast('Notion API token の形式を確認してください', 'error');
       return false;
     }
-    GM_setValue(URL_KEY, url);
-    toast(url ? '保存先URLを設定しました' : '保存先URLを削除しました');
-    return Boolean(url);
+    GM_setValue(TOKEN_KEY, token);
+    toast(token ? 'Notion token をローカル設定に保存しました' : 'Notion token を削除しました');
+    return Boolean(token);
   }
 
-  GM_registerMenuCommand('投稿ストック: 保存先URLを設定', promptWebAppUrl);
+  GM_registerMenuCommand('投稿ストック: Notion API token を設定', promptNotionToken);
+  GM_registerMenuCommand('投稿ストック: Notion API token を削除', () => {
+    GM_setValue(TOKEN_KEY, '');
+    toast('Notion token をローカル設定から削除しました');
+  });
 
   let savedKeys = new Set(GM_getValue(SAVED_KEY, []));
   function markSaved(key) {
@@ -71,76 +77,196 @@
     GM_setValue(SAVED_KEY, list);
   }
 
-  // ---- Network -----------------------------------------------------------
-  // Apps Script answers with an HTML page instead of JSON when the deployment
-  // is not reachable as intended; turn the common cases into a readable hint.
-  function explainHtml(res) {
-    const html = String(res.responseText || '');
-    const finalUrl = String(res.finalUrl || '');
-    const title = (html.match(/<title>([^<]*)<\/title>/i) || [])[1] || '';
-    const text = html.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ')
-      .replace(/<[^>]+>/g, ' ').replace(/&[a-z#0-9]+;/gi, ' ').replace(/\s+/g, ' ').trim();
-    if (/accounts\.google\.com|ServiceLogin/i.test(finalUrl + html)) {
-      return 'Googleのログイン画面が返りました。デプロイの「アクセスできるユーザー」を「全員」にしてください';
-    }
-    if (/doPost|doGet/.test(text) && /(not found|見つかりません)/i.test(text)) {
-      return 'doPostが見つかりません。Code.gsを保存してから、デプロイを管理で新バージョンを作ってください';
-    }
-    if (/(permission|権限|access denied|アクセス|許可)/i.test(text)) {
-      return 'アクセスが拒否されました。デプロイを「自分として実行・全員がアクセス可」で作り直し、権限を許可してください';
-    }
-    if (/(not found|見つかりません|404)/i.test(title + text)) {
-      return 'ウェブアプリが見つかりません。保存先URL（…/exec）が最新のデプロイか確認してください';
-    }
-    const detail = (text || title).slice(0, 120);
-    return 'GASがJSONではなくHTMLを返しました' + (detail ? '：' + detail : '');
-  }
-
-  function postJson(url, payload) {
+  function notionRequest(method, path, payload) {
+    const token = getNotionToken();
+    if (!token) return Promise.reject(new Error('Notion API token が未設定です。メニューから設定してください'));
     return new Promise((resolve, reject) => {
-      GM_xmlhttpRequest({
-        method: 'POST',
-        url,
-        timeout: 20000,
-        // text/plain keeps Apps Script from rejecting the body.
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        data: JSON.stringify(payload),
-        onload: res => {
-          const body = String(res.responseText || '').trim();
-          if (body.startsWith('<')) {
-            console.warn('[SNS Post Stock] HTML response', res.status, res.finalUrl, body.slice(0, 2000));
-            reject(new Error(explainHtml(res)));
-            return;
-          }
-          if (res.status < 200 || res.status >= 300) {
-            reject(new Error('HTTP ' + res.status));
-            return;
-          }
-          try {
-            resolve(JSON.parse(body));
-          } catch {
-            reject(new Error('応答を読めませんでした：' + body.slice(0, 80)));
-          }
+      const options = {
+        method,
+        url: 'https://api.notion.com/v1' + path,
+        timeout: 25000,
+        headers: {
+          'Authorization': 'Bearer ' + token,
+          'Notion-Version': NOTION_VERSION,
+          'Content-Type': 'application/json'
         },
-        onerror: () => reject(new Error('通信エラー')),
-        ontimeout: () => reject(new Error('タイムアウト'))
-      });
+        onload: res => {
+          let body;
+          try { body = JSON.parse(String(res.responseText || '{}')); }
+          catch { reject(new Error('Notion API の応答をJSONとして読めませんでした（HTTP ' + res.status + '）')); return; }
+          if (res.status < 200 || res.status >= 300) {
+            const code = body.code ? ' [' + body.code + ']' : '';
+            let message = body.message || ('HTTP ' + res.status);
+            if (res.status === 401) message = 'Notion API token が無効です。tokenを再設定してください';
+            if (res.status === 403) message = 'Notion integration にデータベースのアクセス権がありません。SNS Post Archive の「Add connections」で該当integrationを追加してください';
+            if (res.status === 404) message = 'Notion database が見つからないか、integrationに共有されていません。データベースの共有設定を確認してください';
+            reject(new Error(message + code));
+            return;
+          }
+          resolve(body);
+        },
+        onerror: () => reject(new Error('Notion API への通信に失敗しました')),
+        ontimeout: () => reject(new Error('Notion API がタイムアウトしました'))
+      };
+      if (payload !== undefined) options.data = JSON.stringify(payload);
+      GM_xmlhttpRequest(options);
     });
   }
 
-  // Menu: check the deployment from here (same request path as a real save).
-  GM_registerMenuCommand('投稿ストック: 保存先の接続テスト', async () => {
-    const url = getWebAppUrl();
-    if (!url) { promptWebAppUrl(); return; }
-    toast('接続テスト中…');
+  GM_registerMenuCommand('投稿ストック: Notion 接続テスト', async () => {
+    if (!getNotionToken() && !promptNotionToken()) return;
+    toast('Notion 接続テスト中…');
     try {
-      const result = await postJson(url, { action: 'tags' });
-      if (!result?.ok) throw new Error(result?.error || 'unknown error');
-      toast('接続OK（タグ ' + (result.tags || []).length + '件）');
+      const result = await notionRequest('GET', '/data_sources/' + DATA_SOURCE_ID);
+      toast('Notion接続OK：' + (result.title?.[0]?.plain_text || 'SNS Post Archive'));
     } catch (error) {
-      toast('接続NG：' + error.message, 'error');
+      toast('Notion接続NG：' + error.message, 'error');
     }
   });
+
+  // ---- Notion data helpers ------------------------------------------------
+  function richText(value) {
+    const text = String(value ?? '');
+    if (!text) return [];
+    const chunks = [];
+    let chunk = '';
+    for (const char of text) {
+      if (chunk.length + char.length > 1800) {
+        if (chunks.length < 100) chunks.push({ type: 'text', text: { content: chunk } });
+        chunk = '';
+      }
+      if (chunks.length >= 100) break;
+      chunk += char;
+    }
+    if (chunk && chunks.length < 100) chunks.push({ type: 'text', text: { content: chunk } });
+    return chunks;
+  }
+
+  function readRichText(prop) {
+    return Array.isArray(prop?.rich_text)
+      ? prop.rich_text.map(part => part.plain_text ?? part.text?.content ?? '').join('')
+      : '';
+  }
+
+  function readDate(prop) {
+    return prop?.date?.start || '';
+  }
+
+  function readNumber(prop, fallback = 0) {
+    return typeof prop?.number === 'number' ? prop.number : fallback;
+  }
+
+  function parseJsonText(value, fallback) {
+    try { return value ? JSON.parse(value) : fallback; }
+    catch { return fallback; }
+  }
+
+  function cleanNotionDate(value) {
+    if (!value) return null;
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  }
+
+  function postTitle(post) {
+    const author = String(post.author?.name || post.author?.handle || 'Unknown');
+    const body = String(post.text || post.rawText || '').replace(/\s+/g, ' ').trim();
+    return (author + ' — ' + (body || post.postId || 'SNS post')).slice(0, 180);
+  }
+
+  function platformLabel(platform) {
+    return String(platform || '').toLowerCase() === 'threads' ? 'Threads' : 'X';
+  }
+
+  function queryByPostKey(key) {
+    return notionRequest('POST', '/data_sources/' + DATA_SOURCE_ID + '/query', {
+      filter: { property: 'Post Key', rich_text: { equals: key } },
+      page_size: 1
+    }).then(result => result.results?.[0] || null);
+  }
+
+  function mergePostTags(current, add, remove) {
+    const tags = [...(current || [])];
+    const has = tag => tags.some(item => item.toLowerCase() === tag.toLowerCase());
+    (add || []).map(cleanTag).filter(Boolean).forEach(tag => { if (!has(tag)) tags.push(tag); });
+    const drop = (remove || []).map(tag => cleanTag(tag).toLowerCase());
+    return tags.filter(tag => !drop.includes(tag.toLowerCase())).slice(0, 100);
+  }
+
+  function buildNotionProperties(record) {
+    const metrics = record.metrics || {};
+    const snapshots = record.snapshots || [];
+    const payloadText = JSON.stringify(record);
+    const clippedPayload = payloadText.length > 170000 ? payloadText.slice(0, 170000) : payloadText;
+    const savedFrom = /^https?:\/\//i.test(String(record.savedFrom || '')) ? record.savedFrom : null;
+    const postUrl = /^https?:\/\//i.test(String(record.url || '')) ? record.url : null;
+    const title = postTitle(record);
+    const date = value => {
+      const start = cleanNotionDate(value);
+      return { date: start ? { start } : null };
+    };
+    const number = value => ({ number: typeof value === 'number' && Number.isFinite(value) ? value : null });
+    return {
+      'Name': { title: [{ type: 'text', text: { content: title } }] },
+      'Post Key': { rich_text: richText(record.platform + ':' + record.postId) },
+      'Platform': { select: { name: platformLabel(record.platform) } },
+      'Post URL': { url: postUrl },
+      'Author Name': { rich_text: richText(record.author?.name || '') },
+      'Handle': { rich_text: richText(record.author?.handle || '') },
+      'Author ID': { rich_text: richText(record.author?.id || '') },
+      'Text': { rich_text: richText(record.text || record.rawText || '') },
+      'Created At': date(record.createdAt),
+      'Likes': number(metrics.likes),
+      'Reposts': number(metrics.reposts),
+      'Replies': number(metrics.replies),
+      'Quotes': number(metrics.quotes),
+      'Bookmarks': number(metrics.bookmarks),
+      'Views': number(metrics.views),
+      'Shares': number(metrics.shares),
+      'Media Count': number((record.media || []).length),
+      'Media JSON': { rich_text: richText(JSON.stringify(record.media || [])) },
+      'Links JSON': { rich_text: richText(JSON.stringify(record.links || [])) },
+      'Saved From': { url: savedFrom },
+      'First Saved At': date(record.firstSavedAt),
+      'Last Saved At': date(record.lastSavedAt),
+      'Save Count': number(record.saveCount || 1),
+      'Tags': { multi_select: (record.tags || []).map(name => ({ name })) },
+      'Memo': { rich_text: richText(record.memo || '') },
+      'Metrics History': { rich_text: richText(JSON.stringify(snapshots)) },
+      'Full Payload': { rich_text: richText(clippedPayload) },
+      'Truncated': { checkbox: Boolean(record.truncated) }
+    };
+  }
+
+  function tagsFromPage(page) {
+    return (page?.properties?.Tags?.multi_select || []).map(item => item.name).filter(Boolean);
+  }
+
+  function countTagsFromPages(pages) {
+    const counts = new Map();
+    for (const page of pages) {
+      for (const tag of tagsFromPage(page)) {
+        const key = tag.toLowerCase();
+        const item = counts.get(key) || { name: tag, count: 0 };
+        item.count += 1;
+        counts.set(key, item);
+      }
+    }
+    return [...counts.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  }
+
+  async function fetchTagList() {
+    const pages = [];
+    let cursor = '';
+    for (let page = 0; page < 10; page += 1) {
+      const body = { page_size: 100, sorts: [{ property: 'Last Saved At', direction: 'descending' }] };
+      if (cursor) body.start_cursor = cursor;
+      const result = await notionRequest('POST', '/data_sources/' + DATA_SOURCE_ID + '/query', body);
+      pages.push(...(result.results || []));
+      if (!result.has_more || !result.next_cursor) break;
+      cursor = result.next_cursor;
+    }
+    return countTagsFromPages(pages);
+  }
 
   // ---- Helpers -----------------------------------------------------------
   // "1,234" / "1.2K" / "3.4M" / "1.2万" / "3億" → number
@@ -403,7 +529,7 @@
 
   // ---- Tags (local cache) ------------------------------------------------
   const POST_TAGS_KEY = 'postTags';   // { "x:123": ["tag", …] } for saved posts
-  const TAG_LIST_KEY = 'tagList';     // [{ name, count }] from the sheet
+  const TAG_LIST_KEY = 'tagList';     // [{ name, count }] cached from Notion
   const RECENT_TAGS_KEY = 'recentTags';
   const TAG_LIST_TTL = 10 * 60 * 1000;
   const MAX_CHIPS = 16;
@@ -434,22 +560,19 @@
   }
 
   async function refreshTagList(force) {
-    const url = getWebAppUrl();
-    if (!url || (!force && Date.now() - tagListFetchedAt < TAG_LIST_TTL)) return;
+    if (!getNotionToken() || (!force && Date.now() - tagListFetchedAt < TAG_LIST_TTL)) return;
     tagListFetchedAt = Date.now();
     try {
-      const result = await postJson(url, { action: 'tags' });
-      if (result?.ok && Array.isArray(result.tags)) {
-        tagList = result.tags;
-        GM_setValue(TAG_LIST_KEY, tagList);
-        if (panel.btn) renderPanel();
-      }
+      const tags = await fetchTagList();
+      tagList = tags;
+      GM_setValue(TAG_LIST_KEY, tagList);
+      if (panel.btn) renderPanel();
     } catch (error) {
       console.warn('[SNS Post Stock] tag list failed:', error);
     }
   }
 
-  // Recently used first, then the most used ones in the sheet.
+  // Recently used first, then the most used ones in Notion.
   function candidateTags(filter) {
     const seen = new Set();
     const out = [];
@@ -776,11 +899,7 @@
   }
 
   async function save(btn, { addTags = [] } = {}) {
-    let url = getWebAppUrl();
-    if (!url) {
-      if (!promptWebAppUrl()) return false;
-      url = getWebAppUrl();
-    }
+    if (!getNotionToken() && !promptNotionToken()) return false;
     let post;
     try {
       post = btn._extract();
@@ -791,48 +910,90 @@
       toast('投稿の情報を読み取れませんでした', 'error');
       return false;
     }
+
     post.savedFrom = location.href;
     post.clientSavedAt = new Date().toISOString();
     post.scriptVersion = VERSION;
     post.userAgent = navigator.userAgent;
-    if (addTags.length) post.addTags = addTags;
 
     const before = btn.dataset.state;
     setState(btn, 'busy');
     if (panel.btn === btn) renderPanel();
     try {
-      const result = await postJson(url, post);
-      if (!result?.ok) throw new Error(result?.error || 'unknown error');
       const key = post.platform + ':' + post.postId;
+      const existing = await queryByPostKey(key);
+      const now = new Date().toISOString();
+      const props = existing?.properties || {};
+      const previousPayload = parseJsonText(readRichText(props['Full Payload']), {});
+      const previousText = readRichText(props['Text']);
+      const previousTags = tagsFromPage(existing);
+      const previousMemo = readRichText(props['Memo']);
+      const oldCount = readNumber(props['Save Count'], 1);
+      const firstSavedAt = readDate(props['First Saved At']) || existing?.created_time || now;
+      const previousSnapshots = parseJsonText(readRichText(props['Metrics History']), previousPayload.snapshots || []);
+      const snapshots = [...(Array.isArray(previousSnapshots) ? previousSnapshots : []),
+        { at: now, metrics: post.metrics || {} }].slice(-30);
+      const count = existing ? oldCount + 1 : 1;
+      const tags = mergePostTags(previousTags, addTags, []);
+      const record = Object.assign({}, post, {
+        firstSavedAt,
+        lastSavedAt: now,
+        saveCount: count,
+        snapshots,
+        tags,
+        memo: previousMemo
+      });
+
+      // Keep an earlier full-text capture when a new timeline capture is truncated.
+      if (post.truncated && previousText && previousText.length > String(post.text || '').length) {
+        record.text = previousText;
+        record.truncated = Boolean(props.Truncated?.checkbox);
+        if (previousPayload.rawText) record.rawText = previousPayload.rawText;
+      }
+
+      const properties = buildNotionProperties(record);
+      let result;
+      if (existing) {
+        result = await notionRequest('PATCH', '/pages/' + existing.id, { properties });
+      } else {
+        result = await notionRequest('POST', '/pages', {
+          parent: { type: 'data_source_id', data_source_id: DATA_SOURCE_ID },
+          properties
+        });
+      }
+
       markSaved(key);
       btn.dataset.key = key;
-      if (Array.isArray(result.tags)) setPostTags(key, result.tags);
+      setPostTags(key, tags);
       setState(btn, 'saved');
       refreshButtons(key);
       if (panel.btn === btn) { renderPanel(); positionPanel(); }
       const tagText = addTags.length ? ' #' + addTags.join(' #') : '';
-      toast(result.duplicate
-        ? '更新しました（' + result.count + '回目）' + tagText + (post.truncated ? ' ※本文は省略表示' : '')
-        : '保存しました: ' + post.author.handle + tagText + (post.truncated ? '（本文は省略表示。詳細画面で保存すると全文）' : ''));
-      return true;
+      toast(existing
+        ? 'Notionを更新しました（' + count + '回目）' + tagText + (post.truncated ? ' ※本文は省略表示' : '')
+        : 'Notionに保存しました: ' + (post.author?.handle || post.author?.name || '投稿') + tagText + (post.truncated ? '（本文は省略表示。詳細画面で保存すると全文）' : ''));
+      return Boolean(result?.id);
     } catch (error) {
       console.warn('[SNS Post Stock] save failed:', error);
       setState(btn, before === 'saved' ? 'saved' : 'idle');
       if (panel.btn === btn) renderPanel();
-      toast('保存できませんでした（' + error.message + '）', 'error');
+      toast('Notionに保存できませんでした（' + error.message + '）', 'error');
       return false;
     }
   }
 
-  async function retag(btn, { addTags = [], removeTags = [], prev = null }) {
-    const url = getWebAppUrl();
+  async function retag(btn, { addTags = [], removeTags = [], prev = null } = {}) {
     const [platform, ...rest] = (btn.dataset.key || '').split(':');
     const postId = rest.join(':');
-    if (!url || !postId) return false;
+    if (!postId || !getNotionToken()) return false;
     try {
-      const result = await postJson(url, { action: 'tag', platform, postId, addTags, removeTags });
-      if (!result?.ok) throw new Error(result?.error || 'unknown error');
-      setPostTags(btn.dataset.key, result.tags || []);
+      const page = await queryByPostKey(platform + ':' + postId);
+      if (!page) throw new Error('Notionに対象投稿が見つかりません');
+      const tags = mergePostTags(tagsFromPage(page), addTags, removeTags);
+      await notionRequest('PATCH', '/pages/' + page.id, {
+        properties: { 'Tags': { multi_select: tags.map(name => ({ name })) } }
+      });
+      setPostTags(btn.dataset.key, tags);
       refreshButtons(btn.dataset.key);
       if (panel.btn === btn) { renderPanel(); positionPanel(); }
       toast(addTags.length ? 'タグを追加: #' + addTags.join(' #') : 'タグを外しました: #' + removeTags.join(' #'));
