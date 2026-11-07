@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SNS Post Stock (X / Threads)
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      1.2.0
+// @version      1.2.1
 // @description  One tap on 📌 saves X / Threads posts directly to a Notion database (text, author, metrics, media, links and tags).
 // @author       nomuonji
 // @match        https://x.com/*
@@ -30,7 +30,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.2.0';
+  const VERSION = '1.2.1';
 
   // ---- Settings / Notion API ---------------------------------------------
   const TOKEN_KEY = 'notionApiToken';
@@ -126,7 +126,7 @@
   });
 
   // ---- Notion data helpers ------------------------------------------------
-  function richText(value) {
+  function toNotionRichText(value) {
     const text = String(value ?? '');
     if (!text) return [];
     const chunks = [];
@@ -208,13 +208,13 @@
     const number = value => ({ number: typeof value === 'number' && Number.isFinite(value) ? value : null });
     return {
       'Name': { title: [{ type: 'text', text: { content: title } }] },
-      'Post Key': { rich_text: richText(record.platform + ':' + record.postId) },
+      'Post Key': { rich_text: toNotionRichText(record.platform + ':' + record.postId) },
       'Platform': { select: { name: platformLabel(record.platform) } },
       'Post URL': { url: postUrl },
-      'Author Name': { rich_text: richText(record.author?.name || '') },
-      'Handle': { rich_text: richText(record.author?.handle || '') },
-      'Author ID': { rich_text: richText(record.author?.id || '') },
-      'Text': { rich_text: richText(record.text || record.rawText || '') },
+      'Author Name': { rich_text: toNotionRichText(record.author?.name || '') },
+      'Handle': { rich_text: toNotionRichText(record.author?.handle || '') },
+      'Author ID': { rich_text: toNotionRichText(record.author?.id || '') },
+      'Text': { rich_text: toNotionRichText(record.text || record.rawText || '') },
       'Created At': date(record.createdAt),
       'Likes': number(metrics.likes),
       'Reposts': number(metrics.reposts),
@@ -224,16 +224,16 @@
       'Views': number(metrics.views),
       'Shares': number(metrics.shares),
       'Media Count': number((record.media || []).length),
-      'Media JSON': { rich_text: richText(JSON.stringify(record.media || [])) },
-      'Links JSON': { rich_text: richText(JSON.stringify(record.links || [])) },
+      'Media JSON': { rich_text: toNotionRichText(JSON.stringify(record.media || [])) },
+      'Links JSON': { rich_text: toNotionRichText(JSON.stringify(record.links || [])) },
       'Saved From': { url: savedFrom },
       'First Saved At': date(record.firstSavedAt),
       'Last Saved At': date(record.lastSavedAt),
       'Save Count': number(record.saveCount || 1),
       'Tags': { multi_select: (record.tags || []).map(name => ({ name })) },
-      'Memo': { rich_text: richText(record.memo || '') },
-      'Metrics History': { rich_text: richText(JSON.stringify(snapshots)) },
-      'Full Payload': { rich_text: richText(clippedPayload) },
+      'Memo': { rich_text: toNotionRichText(record.memo || '') },
+      'Metrics History': { rich_text: toNotionRichText(JSON.stringify(snapshots)) },
+      'Full Payload': { rich_text: toNotionRichText(clippedPayload) },
       'Truncated': { checkbox: Boolean(record.truncated) }
     };
   }
