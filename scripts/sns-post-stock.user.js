@@ -197,7 +197,7 @@
     const metrics = record.metrics || {};
     const snapshots = record.snapshots || [];
     const payloadText = JSON.stringify(record);
-    const clippedPayload = payloadText.length > 170000 ? payloadText.slice(0, 170000) : payloadText;
+    const clippedPayload = payloadText.length > 42000 ? payloadText.slice(0, 42000) : payloadText;
     const savedFrom = /^https?:\/\//i.test(String(record.savedFrom || '')) ? record.savedFrom : null;
     const postUrl = /^https?:\/\//i.test(String(record.url || '')) ? record.url : null;
     const title = postTitle(record);
