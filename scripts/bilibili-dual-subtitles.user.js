@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bilibili Dual Subtitles (EN + JA)
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      0.6.2
-// @description  Bilibili字幕の新旧DOMを認識。サンプル字幕・無関係な動画UIは検出せず、APIは手動取得のみ。
+// @version      0.7.0
+// @description  Bilibili字幕と外部字幕ファイルを英日表示。外部ファイルはローカル処理。
 // @author       nomuonji
 // @match        https://www.bilibili.com/video/*
 // @match        https://bilibili.com/video/*
@@ -36,6 +36,7 @@
     font: Math.max(16,Math.min(40,Number(GM_getValue('dual-font', 24))||24)),
     bottom: Math.max(2,Math.min(60,Number(GM_getValue('dual-bottom', 11))||11)),
     horizontal: Math.max(10,Math.min(90,Number(GM_getValue('dual-horizontal', 50))||50)),
+    subtitleOffset: Math.max(-300,Math.min(300,Number(GM_getValue('dual-offset', 0))||0)),
     page: '', generation: 0, player: null, video: null, root: null, caption: null,
     status: '字幕を確認中…', statusElement: null, button: null,
     source: null, english: null, japanese: null,
@@ -210,6 +211,136 @@
   function cues(body) {
     if(!Array.isArray(body))return [];
     return body.filter(x=>typeof x.content==='string'&&Number.isFinite(Number(x.from))&&Number.isFinite(Number(x.to))&&Number(x.to)>Number(x.from)).map(x=>({from:Number(x.from),to:Number(x.to),content:x.content.trim()})).filter(x=>x.content).sort((a,b)=>a.from-b.from);
+  }
+  function parseTimestampSeconds(value) {
+    const match=String(value||'').trim().match(/^(?:(\d+):)?([0-5]?\d):([0-5]?\d)[,.](\d{1,3})$/);
+    if(!match)return null;
+    const milliseconds=Number(String(match[4]).padEnd(3,'0').slice(0,3));
+    return Number(match[1]||0)*3600+Number(match[2])*60+Number(match[3])+milliseconds/1000;
+  }
+  function cleanSubtitleText(value) {
+    return String(value||'')
+      .replace(/\{[^}]*\}/g,'')
+      .replace(/\\[Nn]/g,'\n')
+      .replace(/\\h/g,' ')
+      .replace(/<[^>]*>/g,'')
+      .replace(/&nbsp;/gi,' ')
+      .replace(/&amp;/gi,'&')
+      .replace(/&lt;/gi,'<')
+      .replace(/&gt;/gi,'>')
+      .replace(/&quot;/gi,'"')
+      .replace(/&#39;/gi,"'")
+      .trim();
+  }
+  function parseTimedSubtitle(text) {
+    const lines=String(text||'').replace(/^\uFEFF/,'').replace(/\r\n?/g,'\n').split('\n');
+    const items=[];
+    const timing=/((?:\d+:)?\d{2}:\d{2}[,.]\d{1,3})\s*-->\s*((?:\d+:)?\d{2}:\d{2}[,.]\d{1,3})/;
+    let current=null;
+    const flush=()=>{
+      if(!current)return;
+      const content=cleanSubtitleText(current.lines.join('\n'));
+      if(content)items.push({from:current.from,to:current.to,content});
+      current=null;
+    };
+    for(const rawLine of lines) {
+      const line=rawLine.trimEnd();
+      const match=line.match(timing);
+      if(match) {
+        flush();
+        current={from:parseTimestampSeconds(match[1]),to:parseTimestampSeconds(match[2]),lines:[]};
+        if(current.from===null||current.to===null||current.to<=current.from)current=null;
+        continue;
+      }
+      if(!current)continue;
+      if(!line.trim()) {flush();continue;}
+      if(/^(?:WEBVTT|NOTE\b|STYLE\b|REGION\b)/i.test(line.trim())) {flush();continue;}
+      if(/^\d+$/.test(line.trim()))continue;
+      current.lines.push(line);
+    }
+    flush();
+    return cues(items);
+  }
+  function parseAssSeconds(value) {
+    const match=String(value||'').trim().match(/^(\d+):([0-5]?\d):([0-5]?\d)\.(\d{1,2})$/);
+    if(!match)return null;
+    return Number(match[1])*3600+Number(match[2])*60+Number(match[3])+Number(String(match[4]).padEnd(2,'0'))/100;
+  }
+  function splitAssFields(value,count) {
+    const parts=[];
+    let start=0;
+    for(let i=0;i<count-1;i++) {
+      const comma=value.indexOf(',',start);
+      if(comma<0)return null;
+      parts.push(value.slice(start,comma));
+      start=comma+1;
+    }
+    parts.push(value.slice(start));
+    return parts;
+  }
+  function parseAssSubtitle(text) {
+    const lines=String(text||'').replace(/^\uFEFF/,'').replace(/\r\n?/g,'\n').split('\n');
+    const items=[];
+    let fields=['layer','start','end','style','name','marginl','marginr','marginv','effect','text'];
+    for(const rawLine of lines) {
+      const line=rawLine.trim();
+      if(/^Format\s*:/i.test(line)) {
+        fields=line.slice(line.indexOf(':')+1).split(',').map(value=>value.trim().toLowerCase());
+        continue;
+      }
+      if(!/^Dialogue\s*:/i.test(line))continue;
+      const values=splitAssFields(line.slice(line.indexOf(':')+1).trimStart(),fields.length);
+      if(!values)continue;
+      const row=Object.fromEntries(fields.map((field,index)=>[field,values[index]??'']));
+      const from=parseAssSeconds(row.start);
+      const to=parseAssSeconds(row.end);
+      const content=cleanSubtitleText(row.text);
+      if(from!==null&&to!==null&&to>from&&content)items.push({from,to,content});
+    }
+    return cues(items);
+  }
+  function parseExternalSubtitle(text,extension) {
+    const ext=String(extension||'').toLowerCase().replace(/^\./,'');
+    let items=[];
+    if(['srt','vtt','txt'].includes(ext))items=parseTimedSubtitle(text);
+    else if(['ass','ssa'].includes(ext))items=parseAssSubtitle(text);
+    else if(ext==='json') {
+      let payload;
+      try {payload=JSON.parse(String(text||'').replace(/^\uFEFF/,''));}
+      catch {throw new Error('JSON字幕を読み取れませんでした');}
+      const body=Array.isArray(payload)?payload:
+        Array.isArray(payload?.body)?payload.body:
+        Array.isArray(payload?.data?.body)?payload.data.body:null;
+      if(body)items=cues(body);
+      else if(Array.isArray(payload?.events)) {
+        const converted=payload.events.map(event=>{
+          const from=Number(event?.tStartMs)/1000;
+          const duration=Number(event?.dDurationMs)/1000;
+          const content=(event?.segs||[]).map(segment=>segment?.utf8||'').join('');
+          return {from,to:from+duration,content};
+        });
+        items=cues(converted);
+      }
+    } else {
+      throw new Error('未対応の字幕形式です（SRT / VTT / ASS / SSA / JSON / 時刻付きTXTに対応）');
+    }
+    if(!items.length)throw new Error('再生時間のタイムコードが見つかりません。動画に同期するには開始・終了時刻付きの字幕が必要です。');
+    if(items.length>50000)throw new Error('字幕が50,000行を超えています。エピソード単位に分けてください。');
+    return items;
+  }
+  function guessSubtitleLanguage(fileName,text) {
+    const name=String(fileName||'').replace(/[_()[\]-]/g,' ').toLowerCase();
+    if(/\b(?:ja|jp|jpn|japanese|nihongo)\b/.test(name))return 'ja';
+    if(/\b(?:en|eng|english)\b/.test(name))return 'en';
+    if(/\b(?:zh|zho|chi|chinese|mandarin|cn)\b/.test(name))return 'zh';
+    const sample=String(text||'').slice(0,12000);
+    const kana=(sample.match(/[\u3040-\u30ff]/g)||[]).length;
+    const han=(sample.match(/[\u4e00-\u9fff]/g)||[]).length;
+    const latin=(sample.match(/[A-Za-z]/g)||[]).length;
+    if(kana>=2)return 'ja';
+    if(han>=4)return 'zh';
+    if(latin>=4)return 'en';
+    return null;
   }
   function pageMetadata(bvid,page) {
     const video=globalThis.__INITIAL_STATE__?.videoData;
@@ -389,18 +520,19 @@
     followNativeCaption();
     setSourceLabel('プレイヤー表示字幕（追加取得なし）');
     status('字幕: プレイヤーで表示中の字幕を利用');
-    updateTranslationStatus();updateFetchButtons();render();
+    updateTranslationStatus();updateFetchButtons();updateExternalControls();render();
     return true;
   }
   function setTracks(tracks,origin) {
     state.english=tracks.find(t=>t.lang==='en')||null;
     state.japanese=tracks.find(t=>t.lang==='ja')||null;
     state.source=tracks.find(t=>t.lang==='zh')||state.english||state.japanese||tracks[0];
+    if(state.nativeHolder?.isConnected&&tracks.some(t=>t.external))state.nativeHolder.style.opacity='0';
     state.translateEpoch++;state.cache.clear();state.pending.clear();state.painted='';
     updateTranslationStatus();
     setSourceLabel(origin);
     status('字幕: '+origin+' ('+tracks.map(t=>t.label).join(' / ')+')');
-    updateFetchButtons();render();
+    updateFetchButtons();updateExternalControls();render();
   }
   // This function is reachable only from a button click via requestSubtitles().
   // Initial load, SPA navigation and periodic DOM checks never call it.
@@ -443,6 +575,9 @@
   function matchCue(track,time) {
     if(!track?.items?.length)return null;
     const items=track.items;
+    const adjustedTime=track.external?time-state.subtitleOffset:time;
+    if(adjustedTime<0)return null;
+    time=adjustedTime;
     let low=0,high=items.length-1;
     while(low<=high) {
       const mid=(low+high)>>1;
@@ -670,13 +805,16 @@
 #vm-dual-root button{border:1px solid #ffffff40;cursor:pointer;border-radius:7px;background:#202632ed;color:#fff;font-size:12px;padding:7px 10px;white-space:nowrap}
 #vm-dual-root button:hover{background:#343b52}
 #vm-dual-root button:focus-visible,#vm-dual-root select:focus-visible{outline:2px solid #ffe188}
-#vm-dual-root .vm-dual-options{position:absolute;z-index:2;top:52px;right:12px;width:300px;max-width:calc(100% - 24px);box-sizing:border-box;padding:15px;border-radius:10px;border:1px solid #ffffff50;background:#141920f7;box-shadow:0 7px 22px #0009;color:#fff;font-size:13px;pointer-events:auto}
+#vm-dual-root .vm-dual-options{position:absolute;z-index:2;top:52px;right:12px;width:340px;max-width:calc(100% - 24px);box-sizing:border-box;padding:15px;border-radius:10px;border:1px solid #ffffff50;background:#141920f7;box-shadow:0 7px 22px #0009;color:#fff;font-size:13px;pointer-events:auto}
 #vm-dual-root .vm-dual-options[hidden]{display:none}
 #vm-dual-root .vm-dual-heading{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;font-weight:bold}
 #vm-dual-root .vm-dual-heading button{font-size:16px;padding:3px 9px}
 #vm-dual-root .vm-dual-options label{display:flex;align-items:center;gap:8px;margin:10px 0}
 #vm-dual-root .vm-dual-options input[type=range]{flex:1;min-width:40px}
 #vm-dual-root .vm-dual-options select{flex:1;border-radius:5px;border:1px solid #ffffff50;background:#242b35;color:#fff;padding:6px}
+#vm-dual-root .vm-dual-options input[type=number]{width:88px;box-sizing:border-box;border:1px solid #ffffff50;border-radius:5px;background:#242b35;color:#fff;padding:6px}
+#vm-dual-root .vm-dual-file-input{display:none!important}
+#vm-dual-root .vm-dual-import-help{margin-top:7px;color:#c2cbd8;font-size:11px;line-height:1.45}
 #vm-dual-root .vm-dual-options .vm-dual-setting-label{width:66px;flex-shrink:0}
 #vm-dual-root .vm-dual-status,#vm-dual-root .vm-dual-translation-status,#vm-dual-root .vm-dual-network-detail,#vm-dual-root .vm-dual-native-detail{line-height:1.45;overflow-wrap:anywhere;margin-top:8px;font-size:12px;color:#d9dee6}
 #vm-dual-root .vm-dual-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
@@ -705,6 +843,11 @@
   <label><span class="vm-dual-setting-label">左右位置</span><input type="range" class="vm-dual-horizontal" min="10" max="90" step="1"><span class="vm-dual-horizontal-label"></span></label>
   <label><span class="vm-dual-setting-label">文字サイズ</span><input type="range" class="vm-dual-font-setting" min="16" max="40" step="2"></label>
   <label><input type="checkbox" class="vm-dual-original-setting">中国語原文も表示</label>
+  <label><span class="vm-dual-setting-label">字幕言語</span><select class="vm-dual-file-lang"><option value="auto">自動判定</option><option value="en">英語</option><option value="ja">日本語</option><option value="zh">中国語</option></select></label>
+  <label><span class="vm-dual-setting-label">同期補正</span><input type="number" class="vm-dual-offset" min="-300" max="300" step="0.1"><span>秒（＋で遅らせる）</span></label>
+  <div class="vm-dual-actions"><button class="vm-dual-import" type="button">外部字幕を読み込む</button><button class="vm-dual-clear-external" type="button" hidden>外部字幕を解除</button></div>
+  <input type="file" class="vm-dual-file-input" accept=".srt,.vtt,.ass,.ssa,.json,.txt" multiple>
+  <div class="vm-dual-import-help">SRT / VTT / ASS / SSA / Bilibili JSON / 時刻付きTXT。ファイルはこのブラウザ内で処理し、外部へ送信しません。</div>
   <div class="vm-dual-actions"><button class="vm-dual-prepare" type="button">翻訳モデルを準備</button><button class="vm-dual-retry" type="button">字幕を取得（追加通信）</button></div>
   <div class="vm-dual-network-detail" role="status"></div>
   <div class="vm-dual-native-detail" role="status"></div>
@@ -725,19 +868,88 @@
     });
     const original=root.querySelector('.vm-dual-original-setting');original.checked=state.original;
     original.addEventListener('change',()=>{state.original=original.checked;GM_setValue('dual-original',state.original);state.painted='';render();});
+    const offset=root.querySelector('.vm-dual-offset');offset.value=String(state.subtitleOffset);
+    offset.addEventListener('change',()=>{state.subtitleOffset=Math.max(-300,Math.min(300,Number(offset.value)||0));offset.value=String(state.subtitleOffset);GM_setValue('dual-offset',state.subtitleOffset);state.painted='';render();});
     const font=root.querySelector('.vm-dual-font-setting');font.value=String(state.font);
     font.addEventListener('input',()=>{state.font=Number(font.value);GM_setValue('dual-font',state.font);root.style.setProperty('--vm-font',state.font+'px');state.painted='';render();});
     const bottom=root.querySelector('.vm-dual-bottom');bottom.value=String(state.bottom);
     bottom.addEventListener('input',()=>{state.bottom=Number(bottom.value);GM_setValue('dual-bottom',state.bottom);updatePosition();});
     const horizontal=root.querySelector('.vm-dual-horizontal');horizontal.value=String(state.horizontal);
     horizontal.addEventListener('input',()=>{state.horizontal=Number(horizontal.value);GM_setValue('dual-horizontal',state.horizontal);updatePosition();});
+    const fileInput=root.querySelector('.vm-dual-file-input');
+    root.querySelector('.vm-dual-import').addEventListener('click',()=>fileInput.click());
+    fileInput.addEventListener('change',()=>{const files=Array.from(fileInput.files||[]);if(files.length)importExternalFiles(files);fileInput.value='';});
+    root.querySelector('.vm-dual-clear-external').addEventListener('click',clearExternalSubtitles);
     root.querySelector('.vm-dual-prepare').addEventListener('click',prepareModels);
     root.querySelector('.vm-dual-retry').addEventListener('click',requestSubtitles);
     root.querySelector('.vm-dual-fetch').addEventListener('click',requestSubtitles);
     root.style.setProperty('--vm-font',state.font+'px');updatePosition();
-    status(state.status);updateNetworkUI();nativeDiagnostics(state.nativeDiagnostics);updateTranslationStatus();enable(state.enabled);updateFetchButtons();
+    status(state.status);updateNetworkUI();nativeDiagnostics(state.nativeDiagnostics);updateTranslationStatus();enable(state.enabled);updateFetchButtons();updateExternalControls();
   }
 
+  function updateExternalControls() {
+    const clear=state.root?.querySelector('.vm-dual-clear-external');
+    const hasExternal=Boolean(state.source?.external||state.english?.external||state.japanese?.external);
+    if(clear)clear.hidden=!hasExternal;
+  }
+  async function importExternalFiles(files) {
+    if(!files?.length||!currentVideo())return;
+    if(files.length>3) {status('一度に読み込めるのは3ファイルまでです。英語・日本語・中国語を1ファイルずつ選んでください。');return;}
+    const button=state.root?.querySelector('.vm-dual-import');
+    if(button)button.disabled=true;
+    status('外部字幕ファイルを読み込んでいます…');
+    try {
+      const imported=[];
+      for(const file of files) {
+        if(file.size>8*1024*1024)throw new Error(file.name+' は8MBを超えています。エピソード単位に分けてください。');
+        const extension=String(file.name.split('.').pop()||'').toLowerCase();
+        const text=await file.text();
+        const items=parseExternalSubtitle(text,extension);
+        const override=state.root?.querySelector('.vm-dual-file-lang')?.value||'auto';
+        const lang=override==='auto'?guessSubtitleLanguage(file.name,text):override;
+        if(!['en','ja','zh'].includes(lang))throw new Error(file.name+' の言語を判定できません。「字幕言語」で英語・日本語・中国語を指定してください。');
+        if(imported.some(track=>track.lang===lang))throw new Error('同じ言語の字幕を複数選択しています。1エピソードにつき各言語1ファイルを選んでください。');
+        imported.push({lang,label:file.name,items,external:true});
+      }
+      const existing=[state.english,state.japanese,state.source].filter(track=>track&&!track.native);
+      const byLanguage=new Map();
+      for(const track of existing)byLanguage.set(track.lang,track);
+      for(const track of imported)byLanguage.set(track.lang,track);
+      const tracks=Array.from(byLanguage.values()).slice(0,3);
+      if(!tracks.length)throw new Error('有効な字幕トラックがありません');
+      state.generation++;
+      releaseNative();
+      setTracks(tracks,'外部字幕ファイル（ローカル）');
+      status('外部字幕を読み込みました: '+imported.map(track=>track.label).join(' / '));
+    } catch(error) {
+      status('外部字幕の読み込みに失敗: '+(error?.message||String(error)));
+      console.warn('[Bili Dual] 外部字幕:',error);
+    } finally {
+      if(button)button.disabled=false;
+      updateExternalControls();updateFetchButtons();
+    }
+  }
+  function clearExternalSubtitles() {
+    const hasExternal=Boolean(state.source?.external||state.english?.external||state.japanese?.external);
+    if(!hasExternal)return;
+    state.generation++;
+    releaseNative();
+    state.source=null;state.english=null;state.japanese=null;
+    state.translateEpoch++;state.cache.clear();state.pending.clear();state.painted='';
+    state.caption?.replaceChildren();
+    const cached=cachedTracks(state.page);
+    if(cached)setTracks(cached,'ローカルキャッシュ（追加取得なし）');
+    else {
+      const native=nativeCaption();
+      if(native)switchToNative(native);
+      else {
+        setSourceLabel('外部字幕解除（追加通信なし）');
+        status('外部字幕を解除しました。標準字幕をONにするか「字幕を取得」を押してください。');
+        updateTranslationStatus();
+      }
+    }
+    updateExternalControls();updateFetchButtons();render();
+  }
   function updateFetchButtons() {
     const primary=state.root?.querySelector('.vm-dual-fetch');
     if(primary) {
@@ -774,7 +986,7 @@
         status('標準字幕をONにするか「字幕を取得」を押してください。');
       }
     }
-    updateFetchButtons();
+    updateFetchButtons();updateExternalControls();
   }
   async function requestSubtitles() {
     // Registered exclusively on explicit user-click controls.
@@ -815,7 +1027,7 @@
     if(element)mount(element);
     if(state.page!==video.bvid+'/'+video.page)refresh();
     const native=nativeCaption();
-    if(native&&!state.source?.native) {
+    if(native&&!state.source?.native&&!state.source?.external) {
       switchToNative(native); // Native captions switched on after page load.
     } else if(state.source?.native)followNativeCaption();
     if(state.source&&state.root?.isConnected)render();
