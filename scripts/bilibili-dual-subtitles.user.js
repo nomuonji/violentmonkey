@@ -918,7 +918,8 @@
       const tracks=Array.from(byLanguage.values()).slice(0,3);
       if(!tracks.length)throw new Error('有効な字幕トラックがありません');
       state.generation++;
-      releaseNative();
+      // Keep the native panel reference so setTracks() can hide it while
+      // external cues are displayed; clearExternalSubtitles() restores it.
       setTracks(tracks,'外部字幕ファイル（ローカル）');
       status('外部字幕を読み込みました: '+imported.map(track=>track.label).join(' / '));
     } catch(error) {
@@ -1027,7 +1028,7 @@
     if(element)mount(element);
     if(state.page!==video.bvid+'/'+video.page)refresh();
     const native=nativeCaption();
-    if(native&&!state.source?.native&&!state.source?.external) {
+    if(native&&!state.source?.native&&!state.source?.external&&!state.english?.external&&!state.japanese?.external) {
       switchToNative(native); // Native captions switched on after page load.
     } else if(state.source?.native)followNativeCaption();
     if(state.source&&state.root?.isConnected)render();
