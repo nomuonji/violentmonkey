@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Language Reactor Don't Learn Translations
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      2.3.1
+// @version      2.4.0
 // @description  Always show dictionary meanings above purple (Don't Learn) words in Language Reactor subtitles.
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -38,6 +38,7 @@
   const LAYER_CLASS = 'lr-dl-layer';
   const LABEL_CLASS = 'lr-dl-label';
   const STYLE_ID = 'lr-dl-style';
+  const SPACING_CLASS = 'lr-dl-extra-line-space';
 
   const RETRY_MS = 30000;
   const EMPTY_RETRY_MS = 15000;
@@ -48,10 +49,12 @@
   let rafId = 0;
   let lastLayoutAt = 0;
   const inspectedWords = new WeakMap();
+  const captionSignatures = new WeakMap();
+  const spacingBlocked = new WeakSet();
   const diagnostics = {
     version: '2.3.1', scannedPurple: 0, labels: 0, visible: 0,
     collisionHidden: 0, offscreenHidden: 0, emptyDictionary: 0, lookupErrors: 0,
-    lastLayout: '', hiddenExamples: [], wordStatuses: []
+    lastLayout: '', hiddenExamples: [], wordStatuses: [], extraLineSpacing: false
   };
   if (typeof GM_registerMenuCommand === 'function') {
     GM_registerMenuCommand('LR 注釈: 表示診断', () => {
@@ -164,6 +167,12 @@
         position: fixed; left: 0; top: 0; width: 0; height: 0;
         overflow: visible; pointer-events: none; z-index: 2147483000;
       }
+      /* Reserve space for glosses only when a dense, multi-line subtitle
+         actually hides one. The Japanese translation stays unmodified. */
+      #lln-subs.${SPACING_CLASS},
+      #lln-subs.${SPACING_CLASS} .lln-word {
+        line-height: 2.05 !important;
+      }
       .${LABEL_CLASS} {
         position: absolute; transform: translateX(-50%);
         max-width: 22em; padding: 2px 7px; border-radius: 4px;
@@ -225,7 +234,7 @@
   function subtitleTextRects() {
     const rects = [];
     const roots = document.querySelectorAll(
-      SUBS_SELECTOR + ', .ytp-caption-window-container, .player-timedtext, .vjs-text-track-display'
+      SUBS_SELECTOR + ', #lln-translations, .ytp-caption-window-container, .player-timedtext, .vjs-text-track-display'
     );
     const range = document.createRange();
     for (const root of roots) {
@@ -272,6 +281,29 @@
       a.top < b.bottom + padding && a.bottom > b.top - padding;
   }
 
+  function isMultilineSubtitle(subs) {
+    const tops = [];
+    for (const word of subs.querySelectorAll(WORD_SELECTOR)) {
+      const rect = word.getBoundingClientRect();
+      if (!rect.width || !rect.height) continue;
+      if (tops.some(top => Math.abs(top - rect.top) > 10)) return true;
+      tops.push(rect.top);
+    }
+    return false;
+  }
+
+  function spacingLayoutSafe(subs) {
+    const english = subs.getBoundingClientRect();
+    const japanese = document.querySelector('#lln-translations');
+    if (japanese && getComputedStyle(japanese).display !== 'none') {
+      const translated = japanese.getBoundingClientRect();
+      if (translated.width && translated.height &&
+          intersects(english, translated, 5)) return false;
+    }
+    const word = subs.querySelector(WORD_SELECTOR);
+    return !word || english.top >= labelBounds(word).top + 4;
+  }
+
   // Annotations must never obscure either LR subtitle line (including the
   // Japanese translation) or native video captions. Hide only the annotation
   // if there is no room, leaving the subtitle fully readable.
@@ -282,6 +314,17 @@
       return;
     }
     lastLayoutAt = now;
+    const spacingRoot = document.querySelector(SUBS_SELECTOR);
+    if (spacingRoot?.classList.contains(SPACING_CLASS) &&
+        !spacingLayoutSafe(spacingRoot)) {
+      // Some LR layouts are top-anchored rather than bottom-anchored. Do not
+      // expand English lines when that would shift them over Japanese text.
+      spacingRoot.classList.remove(SPACING_CLASS);
+      spacingBlocked.add(spacingRoot);
+      lastLayoutAt = 0;
+      if (labels.size) rafId = requestAnimationFrame(positionLabels);
+      return;
+    }
     const protectedRects = subtitleTextRects();
     const placed = [];
     const entries = [...labels.entries()]
@@ -366,6 +409,17 @@
       label.style.top = position.top + 'px';
       diagnostics.visible++;
     }
+    // First give the English lines enough vertical room for compact glosses.
+    // Preserve the current position constraints; never overlay other subtitles
+    // merely to force a label visible. Reset spacing on the next subtitle cue.
+    const subs = document.querySelector(SUBS_SELECTOR);
+    if (subs && diagnostics.labels > diagnostics.visible &&
+        !subs.classList.contains(SPACING_CLASS) && !spacingBlocked.has(subs) &&
+        isMultilineSubtitle(subs)) {
+      subs.classList.add(SPACING_CLASS);
+      lastLayoutAt = 0; // Re-measure after the layout has expanded.
+    }
+    diagnostics.extraLineSpacing = Boolean(subs?.classList.contains(SPACING_CLASS));
     if (labels.size) rafId = requestAnimationFrame(positionLabels);
   }
 
@@ -392,6 +446,15 @@
     const seen = new Set();
     const statuses = [];
     for (const subs of document.querySelectorAll(SUBS_SELECTOR)) {
+      // A new subtitle cue gets a fresh compact layout. Only dense cues that
+      // actually fail collision avoidance expand their English line spacing.
+      const signature = [...subs.querySelectorAll(WORD_SELECTOR)].map(wordText).join(' ');
+      if (captionSignatures.get(subs) !== signature) {
+        captionSignatures.set(subs, signature);
+        subs.classList.remove(SPACING_CLASS);
+        spacingBlocked.delete(subs);
+        lastLayoutAt = 0;
+      }
       const layer = getLayer();
       for (const word of subs.querySelectorAll(WORD_SELECTOR)) {
         if (!isPurple(word)) continue;
