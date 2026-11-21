@@ -14,7 +14,7 @@ Language Reactorの字幕で、Don't Learn に設定された紫色の単語の�
 - Source: [`scripts/language-reactor-dont-learn-translation.user.js`](./scripts/language-reactor-dont-learn-translation.user.js)
 - Install / update: https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/language-reactor-dont-learn-translation.user.js
 - **対象**: YouTube / Netflix 上の Language Reactor 字幕。
-- **動作**: 動画上の字幕で、色が Don't Learn の紫色（`rgb(184, 148, 197)` 付近）の単語を検出し、その単語の上に日本語の意味（最大3つ）を常時表示します。字幕が切り替わると自動で付け替え、注釈同士だけでなく英語・日本語の字幕本文や動画プレイヤーの字幕も避けて配置します。元の英単語から縦38px・横36px以内の近い位置だけを探索し、動画領域内に安全な表示場所がない場合は、字幕を覆わず該当注釈だけ一時的に非表示にします。
+- **動作**: 動画上の字幕で、色が Don't Learn の紫色（`rgb(184, 148, 197)` 付近）の単語を検出し、その単語の上に日本語の意味（最大3つ）を常時表示します。字幕が切り替わると自動で付け替え、注釈同士だけでなく英語・日本語の字幕本文や動画プレイヤーの字幕も避けて配置します。注釈は対象の英単語要素に直接固定し、プレイヤーの拡大縮小や字幕の行送りでも離れないようにします。配置は単語の直上のみで、字幕との衝突を左右の小さな調整で回避できない場合は、字幕を覆わず該当注釈だけ一時的に非表示にします。
 - **仕組み**: Language Reactorの辞書ポップは実際のマウス操作でしか開かないため、ホバーの偽装はせず、LRがホバー辞書に使っている辞書API（`api-cdn-plus.dioco.io`）を単語ごとに直接引いています（同じ単語は1回だけ取得してキャッシュ）。
 - **設定**: スクリプト冒頭の `TARGET_LANG`（訳の言語）、`TARGET_COLOR`（紫色）、`MAX_MEANINGS` で調整できます。
 - **注意**: 対象は動画上の字幕（`#lln-subs`）で、右側のサイドバー字幕は対象外です。Language Reactor側のAPI・色・DOM構造が変わると調整が必要です。YouTubeでは実ブラウザで表示を確認済み、Netflixは未確認です。
