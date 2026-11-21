@@ -14,7 +14,7 @@ Language Reactorの字幕で、Don't Learn に設定された紫色の単語の�
 - Source: [`scripts/language-reactor-dont-learn-translation.user.js`](./scripts/language-reactor-dont-learn-translation.user.js)
 - Install / update: https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/language-reactor-dont-learn-translation.user.js
 - **対象**: YouTube / Netflix 上の Language Reactor 字幕。
-- **動作**: 動画上の字幕で、色が Don't Learn の紫色（`rgb(184, 148, 197)` 付近）の単語を検出し、その単語の上に日本語の意味（最大3つ）を常時表示します。字幕が切り替わると自動で付け替え、注釈同士だけでなく英語・日本語の字幕本文や動画プレイヤーの字幕も避けて配置します。注釈は動画の拡大縮小に影響されない画面基準の独立レイヤーに描画し、英単語の実際の表示位置に合わせます。v2.2.0で全注釈が非表示になる問題を解消するため、表示実績のあるv2.1.1の衝突回避処理に戻し、位置変換だけを修正しています。字幕や他の注釈と重なる場合は近くの空き位置を試し、置き場所がなければ注釈だけ一時的に非表示にします。
+- **動作**: 動画上の字幕で、色が Don't Learn の紫色（`rgb(184, 148, 197)` 付近）の単語を検出し、その単語の上に日本語の意味（最大3つ）を常時表示します。字幕が切り替わると自動で付け替え、注釈同士だけでなく英語・日本語の字幕本文や動画プレイヤーの字幕も避けて配置します。注釈は動画の拡大縮小に影響されない画面基準の独立レイヤーに描画し、英単語の実際の表示位置に合わせます。字幕や他の注釈と重なる場合は、元の単語近くへの配置を優先し、3語訳→2語訳→1語訳の順に短縮して再試行します。辞書の結果が出る前に一瞬だけ表示される「…」は表示せず、単語ごとに取得結果を保持します。Language Reactorが紫色の単語表示を一時更新しても、350ms以内なら既存の注釈を消さずに維持します。どうしても収まらない注釈は非表示になりますが、表示数・衝突数・辞書取得エラーなどはViolentmonkeyメニューの「LR 注釈: 表示診断」から確認できます。
 - **仕組み**: Language Reactorの辞書ポップは実際のマウス操作でしか開かないため、ホバーの偽装はせず、LRがホバー辞書に使っている辞書API（`api-cdn-plus.dioco.io`）を単語ごとに直接引いています（同じ単語は1回だけ取得してキャッシュ）。
 - **設定**: スクリプト冒頭の `TARGET_LANG`（訳の言語）、`TARGET_COLOR`（紫色）、`MAX_MEANINGS` で調整できます。
 - **注意**: 対象は動画上の字幕（`#lln-subs`）で、右側のサイドバー字幕は対象外です。Language Reactor側のAPI・色・DOM構造が変わると調整が必要です。YouTubeでは実ブラウザで表示を確認済み、Netflixは未確認です。

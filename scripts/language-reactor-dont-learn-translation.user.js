@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         Language Reactor Don't Learn Translations
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      2.2.1
+// @version      2.3.0
 // @description  Always show dictionary meanings above purple (Don't Learn) words in Language Reactor subtitles.
 // @author       nomuonji
 // @match        https://www.youtube.com/*
 // @match        https://www.netflix.com/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
+// @grant        GM_registerMenuCommand
 // @connect      api-cdn-plus.dioco.io
 // @noframes
 // @updateURL    https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/language-reactor-dont-learn-translation.user.js
@@ -44,6 +45,19 @@
   let scanScheduled = false;
   let rafId = 0;
   let lastLayoutAt = 0;
+  const inspectedWords = new WeakMap();
+  const diagnostics = {
+    version: '2.3.0', scannedPurple: 0, labels: 0, visible: 0,
+    collisionHidden: 0, offscreenHidden: 0, emptyDictionary: 0, lookupErrors: 0,
+    lastLayout: '', hiddenExamples: []
+  };
+  if (typeof GM_registerMenuCommand === 'function') {
+    GM_registerMenuCommand('LR 注釈: 表示診断', () => {
+      const report = JSON.stringify(diagnostics, null, 2);
+      console.info('[LR Dont Learn] diagnostics', report);
+      alert('Language Reactor 注釈診断\n' + report);
+    });
+  }
 
   // ---- Dictionary --------------------------------------------------------
   function request(url) {
@@ -171,16 +185,19 @@
   // subtitle line changes, which drops their labels automatically.
   const labels = new Map(); // word element -> { label, text }
 
-  function setLabel(word, layer, text) {
+  function setLabel(word, layer, meanings) {
     let entry = labels.get(word);
     if (!entry || entry.label.parentElement !== layer) {
       entry?.label.remove();
       const label = document.createElement('div');
       label.className = LABEL_CLASS;
       layer.appendChild(label);
-      entry = { label, text: '' };
+      entry = { label, meanings: [], text: '' };
       labels.set(word, entry);
     }
+    const values = meanings.slice(0, MAX_MEANINGS);
+    const text = values.join('・');
+    entry.meanings = values;
     if (entry.text !== text) {
       entry.text = text;
       entry.label.textContent = text;
@@ -263,64 +280,80 @@
         labels.delete(word);
         return false;
       })
-      .map(([word, { label }]) => ({ word, label, rect: word.getBoundingClientRect() }))
+      .map(([word, entry]) => ({
+        word, entry, rect: word.getBoundingClientRect()
+      }))
       .sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+    diagnostics.labels = entries.length;
+    diagnostics.visible = 0;
+    diagnostics.collisionHidden = 0;
+    diagnostics.offscreenHidden = 0;
+    diagnostics.hiddenExamples = [];
+    diagnostics.lastLayout = new Date().toISOString();
 
-    for (const { word, label, rect } of entries) {
+    for (const { word, entry, rect } of entries) {
+      const { label, meanings } = entry;
       label.style.display = '';
       if (!rect.width || !rect.height) {
         label.style.display = 'none';
+        diagnostics.offscreenHidden++;
         continue;
       }
-
       const bounds = labelBounds(word);
-      const width = label.offsetWidth;
-      const height = label.offsetHeight;
-      const margin = 5;
-      if (!width || !height || width + margin * 2 > bounds.right - bounds.left) {
-        label.style.display = 'none';
-        continue;
-      }
-
-      const wordCenterX = rect.left + rect.width / 2;
-      const minCenterX = bounds.left + width / 2 + margin;
-      const maxCenterX = bounds.right - width / 2 - margin;
-      const maxVerticalGap = 38; // Distance between the word and the closest label edge.
-      const maxHorizontalDrift = 36;
+      const margin = 4;
+      const centerOfWord = rect.left + rect.width / 2;
       let position = null;
-
-      // Keep each annotation visibly attached to its own word. The previous
-      // 9-lane search could send labels several lines above their source words.
-      // Prefer a tiny sideways move over another vertical row; if no nearby
-      // collision-free space exists, hide the label rather than let it float.
-      for (let lane = 0; lane < 2 && !position; lane++) {
-        const gap = margin + lane * (height + margin);
-        if (gap > maxVerticalGap) break;
-        for (const above of [true, false]) {
-          const top = above ? rect.top - height - gap : rect.bottom + gap;
-          if (top < bounds.top + margin || top + height > bounds.bottom - margin) continue;
-          for (const offset of [0, -12, 12, -24, 24, -36, 36]) {
-            const centerX = Math.max(minCenterX, Math.min(maxCenterX, wordCenterX + offset));
-            if (Math.abs(centerX - wordCenterX) > maxHorizontalDrift) continue;
-            const left = centerX - width / 2;
-            const box = { left, right: left + width, top, bottom: top + height };
-            if (protectedRects.some(other => intersects(box, other, 3))) continue;
-            if (placed.some(other => intersects(box, other, 4))) continue;
-            position = box;
-            break;
+      let collision = false;
+      // First try directly above/below this exact word. Prefer a shorter
+      // definition to moving the label multiple rows away from its source.
+      for (const lane of [0, 1]) {
+        if (position) break;
+        for (let count = meanings.length; count >= 1 && !position; count--) {
+          label.textContent = meanings.slice(0, count).join('・');
+          const width = label.offsetWidth;
+          const height = label.offsetHeight;
+          if (!width || !height || width + 2 * margin > bounds.right - bounds.left) continue;
+          const gap = margin + lane * (height + margin);
+          if (gap > 32) continue;
+          for (const above of [true, false]) {
+            if (position) break;
+            const top = above ? rect.top - height - gap : rect.bottom + gap;
+            if (top < bounds.top + margin || top + height > bounds.bottom - margin) continue;
+            for (const offset of [0, -10, 10, -20, 20, -30, 30]) {
+              const centerX = Math.max(bounds.left + width / 2 + margin,
+                Math.min(bounds.right - width / 2 - margin, centerOfWord + offset));
+              if (Math.abs(centerX - centerOfWord) > 32) continue;
+              const box = {
+                left: centerX - width / 2, right: centerX + width / 2,
+                top, bottom: top + height
+              };
+              if (protectedRects.some(other => intersects(box, other, 2)) ||
+                  placed.some(other => intersects(box, other, 3))) {
+                collision = true;
+                continue;
+              }
+              position = box;
+              break;
+            }
           }
-          if (position) break;
         }
       }
-
       if (!position) {
         label.style.display = 'none';
+        if (collision) diagnostics.collisionHidden++;
+        else diagnostics.offscreenHidden++;
+        if (diagnostics.hiddenExamples.length < 8) {
+          diagnostics.hiddenExamples.push({
+            word: wordText(word).slice(0, 36),
+            reason: collision ? 'collision' : 'no-nearby-space'
+          });
+        }
         continue;
       }
-      // Fixed overlay is attached to the viewport, not the scaled LR container.
       placed.push(position);
       label.style.left = ((position.left + position.right) / 2) + 'px';
       label.style.top = position.top + 'px';
+      diagnostics.visible++;
     }
     if (labels.size) rafId = requestAnimationFrame(positionLabels);
   }
@@ -334,26 +367,53 @@
     addStyles();
     const seen = new Set();
     for (const subs of document.querySelectorAll(SUBS_SELECTOR)) {
-      const layer = getLayer(subs);
-      if (!layer) continue;
+      const layer = getLayer();
       for (const word of subs.querySelectorAll(WORD_SELECTOR)) {
         if (!isPurple(word)) continue;
         const info = wordInfo(word);
         if (!info) continue;
         seen.add(word);
-        if (!labels.has(word)) setLabel(word, layer, '…');
-        lookup(info.form, info.sourceLang).then(
-          meanings => {
-            if (!word.isConnected || !labels.has(word)) return;
-            if (meanings.length) setLabel(word, layer, meanings.slice(0, MAX_MEANINGS).join('・'));
-            else removeLabel(word);
-          },
-          () => { if (labels.has(word)) removeLabel(word); }
-        );
+        const key = info.sourceLang + '|' + info.form;
+        let state = inspectedWords.get(word);
+        if (!state || state.key !== key) {
+          state = { key, meanings: null, pending: false, retryAt: 0 };
+          inspectedWords.set(word, state);
+        }
+        state.lastSeenAt = Date.now();
+        if (state.meanings?.length) {
+          if (!labels.has(word)) setLabel(word, layer, state.meanings);
+        } else if (!state.pending && state.meanings === null && Date.now() >= state.retryAt) {
+          state.pending = true;
+          lookup(info.form, info.sourceLang).then(meanings => {
+            state.pending = false;
+            state.meanings = meanings;
+            if (!meanings.length) {
+              diagnostics.emptyDictionary++;
+              return;
+            }
+            if (!word.isConnected || !word.closest(SUBS_SELECTOR) || !isPurple(word)) return;
+            setLabel(word, getLayer(), meanings);
+            ensurePositioning();
+          }, () => {
+            state.pending = false;
+            state.retryAt = Date.now() + RETRY_MS;
+            diagnostics.lookupErrors++;
+          });
+        }
       }
     }
+    diagnostics.scannedPurple = seen.size;
     for (const word of [...labels.keys()]) {
-      if (!seen.has(word)) removeLabel(word);
+      if (seen.has(word)) continue;
+      const state = inspectedWords.get(word);
+      // LR sometimes temporarily removes a word's purple styling during
+      // subtitle updates. Avoid flashing a visible gloss off immediately.
+      if (word.isConnected && word.closest(SUBS_SELECTOR) &&
+          Date.now() - (state?.lastSeenAt || 0) < 350) {
+        scheduleScan();
+        continue;
+      }
+      removeLabel(word);
     }
     ensurePositioning();
   }
