@@ -379,6 +379,7 @@
           state = { key, meanings: null, pending: false, retryAt: 0 };
           inspectedWords.set(word, state);
         }
+        state.lastSeenAt = Date.now();
         if (state.meanings?.length) {
           if (!labels.has(word)) setLabel(word, layer, state.meanings);
         } else if (!state.pending && state.meanings === null && Date.now() >= state.retryAt) {
@@ -403,7 +404,16 @@
     }
     diagnostics.scannedPurple = seen.size;
     for (const word of [...labels.keys()]) {
-      if (!seen.has(word)) removeLabel(word);
+      if (seen.has(word)) continue;
+      const state = inspectedWords.get(word);
+      // LR sometimes temporarily removes a word's purple styling during
+      // subtitle updates. Avoid flashing a visible gloss off immediately.
+      if (word.isConnected && word.closest(SUBS_SELECTOR) &&
+          Date.now() - (state?.lastSeenAt || 0) < 350) {
+        scheduleScan();
+        continue;
+      }
+      removeLabel(word);
     }
     ensurePositioning();
   }
