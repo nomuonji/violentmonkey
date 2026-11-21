@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Language Reactor Don't Learn Translations
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      2.4.1
+// @version      2.5.0
 // @description  Always show dictionary meanings above purple (Don't Learn) words in Language Reactor subtitles.
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -38,7 +38,7 @@
   const LAYER_CLASS = 'lr-dl-layer';
   const LABEL_CLASS = 'lr-dl-label';
   const STYLE_ID = 'lr-dl-style';
-  const SPACING_CLASS = 'lr-dl-extra-line-space';
+  const INLINE_CLASS = 'lr-dl-inline-gloss';
 
   const RETRY_MS = 30000;
   const EMPTY_RETRY_MS = 15000;
@@ -49,13 +49,11 @@
   let rafId = 0;
   let lastLayoutAt = 0;
   const inspectedWords = new WeakMap();
-  const captionSignatures = new WeakMap();
-  const spacingBlocked = new WeakSet();
   const diagnostics = {
-    version: '2.4.1', scannedPurple: 0, labels: 0, visible: 0,
+    version: '2.5.0', scannedPurple: 0, labels: 0, visible: 0,
     collisionHidden: 0, offscreenHidden: 0, emptyDictionary: 0, lookupErrors: 0,
     lastLayout: '', hiddenExamples: [], wordStatuses: [], extraLineSpacing: false,
-    spacingBlocked: false, captionRows: 0
+    inlineFallbacks: 0, captionRows: 0
   };
   if (typeof GM_registerMenuCommand === 'function') {
     GM_registerMenuCommand('LR 注釈: 表示診断', () => {
@@ -168,13 +166,17 @@
         position: fixed; left: 0; top: 0; width: 0; height: 0;
         overflow: visible; pointer-events: none; z-index: 2147483000;
       }
-      /* Reserve space for glosses only when a dense, multi-line subtitle
-         actually hides one. The Japanese translation stays unmodified. */
-      /* LR can set line-height on nested caption blocks, overriding its root.
-         Expand the actual text rows, not only the root and each word. */
-      #lln-subs.${SPACING_CLASS},
-      #lln-subs.${SPACING_CLASS} *:not(.${LABEL_CLASS}) {
-        line-height: 2.15 !important;
+      /* A last-resort interlinear note reserves room in the English line box.
+         Unlike the fixed overlay, this note participates in line layout. */
+      .${INLINE_CLASS} {
+        position: absolute; top: 1px; left: 50%;
+        transform: translateX(-50%); box-sizing: border-box;
+        max-width: 200px; white-space: nowrap; overflow: hidden;
+        text-overflow: ellipsis; border-radius: 3px; padding: 1px 4px;
+        background: rgba(20, 20, 24, 0.96); color: white !important;
+        border-bottom: 1px solid rgb(184, 148, 197);
+        font: 600 12px/1.25 system-ui, sans-serif !important;
+        pointer-events: none; text-shadow: none; z-index: 2147483000;
       }
       .${LABEL_CLASS} {
         position: absolute; transform: translateX(-50%);
@@ -215,20 +217,83 @@
       const label = document.createElement('div');
       label.className = LABEL_CLASS;
       layer.appendChild(label);
-      entry = { label, meanings: [], text: '' };
+      entry = { label, meanings: [], text: '', inline: null, savedStyles: null, inlineBlocked: false };
       labels.set(word, entry);
     }
     const values = meanings.slice(0, MAX_MEANINGS);
     const text = values.join('・');
     entry.meanings = values;
+    if (entry.inline) entry.inline.textContent = values[0] || '';
     if (entry.text !== text) {
       entry.text = text;
       entry.label.textContent = text;
     }
   }
 
+  const INLINE_STYLE_PROPS = [
+    'display', 'position', 'padding-top', 'min-width',
+    'vertical-align', 'white-space', 'text-align'
+  ];
+
+  function removeInlineGloss(word, entry) {
+    entry.inline?.remove();
+    entry.inline = null;
+    if (entry.savedStyles) {
+      for (const [name, value, priority] of entry.savedStyles) {
+        if (value) word.style.setProperty(name, value, priority);
+        else word.style.removeProperty(name);
+      }
+      entry.savedStyles = null;
+    }
+  }
+
+  // A word in a packed three-line subtitle may have no free *overlay* space.
+  // In that case use a one-meaning note inside the word's actual line box,
+  // reserving its height so the browser moves the neighboring lines itself.
+  function installInlineGloss(word, entry) {
+    if (entry.inlineBlocked || entry.inline || !entry.meanings.length) return false;
+    entry.savedStyles = INLINE_STYLE_PROPS.map(name =>
+      [name, word.style.getPropertyValue(name), word.style.getPropertyPriority(name)]);
+    const note = document.createElement('span');
+    note.className = INLINE_CLASS;
+    note.setAttribute('aria-hidden', 'true');
+    note.textContent = entry.meanings[0];
+    word.appendChild(note);
+    entry.inline = note;
+
+    const previousPadding = parseFloat(getComputedStyle(word).paddingTop) || 0;
+    word.style.display = 'inline-block';
+    word.style.position = 'relative';
+    word.style.whiteSpace = 'nowrap';
+    word.style.verticalAlign = 'baseline';
+    word.style.textAlign = 'center';
+    word.style.paddingTop = (previousPadding + note.offsetHeight + 5) + 'px';
+    const minWidth = parseFloat(getComputedStyle(word).minWidth) || 0;
+    word.style.minWidth = Math.max(minWidth, note.offsetWidth + 6) + 'px';
+
+    const r = note.getBoundingClientRect();
+    const bounds = labelBounds(word);
+    const japanese = document.querySelector('#lln-translations');
+    const translated = japanese && getComputedStyle(japanese).display !== 'none'
+      ? textRectsWithin(japanese) : [];
+    if (!r.width || !r.height || r.left < bounds.left + 2 ||
+        r.right > bounds.right - 2 || r.top < bounds.top + 2 ||
+        r.bottom > bounds.bottom - 2 ||
+        translated.some(box => intersects(r, box, 2))) {
+      removeInlineGloss(word, entry);
+      entry.inlineBlocked = true;
+      return false;
+    }
+    entry.label.style.display = 'none';
+    return true;
+  }
+
   function removeLabel(word) {
-    labels.get(word)?.label.remove();
+    const entry = labels.get(word);
+    if (entry) {
+      removeInlineGloss(word, entry);
+      entry.label.remove();
+    }
     labels.delete(word);
   }
 
@@ -246,7 +311,7 @@
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
       let node;
       while ((node = walker.nextNode())) {
-        if (!node.textContent.trim() || node.parentElement?.closest('.' + LAYER_CLASS)) continue;
+        if (!node.textContent.trim() || node.parentElement?.closest('.' + LAYER_CLASS + ', .' + INLINE_CLASS)) continue;
         range.selectNodeContents(node);
         for (const rect of range.getClientRects()) {
           if (rect.width > 0 && rect.height > 0) {
@@ -284,17 +349,6 @@
       a.top < b.bottom + padding && a.bottom > b.top - padding;
   }
 
-  function isMultilineSubtitle(subs) {
-    const tops = [];
-    for (const word of subs.querySelectorAll(WORD_SELECTOR)) {
-      const rect = word.getBoundingClientRect();
-      if (!rect.width || !rect.height) continue;
-      if (tops.some(top => Math.abs(top - rect.top) > 10)) return true;
-      tops.push(rect.top);
-    }
-    return false;
-  }
-
   function textRectsWithin(root) {
     if (!root) return [];
     const rects = [];
@@ -317,24 +371,6 @@
     return rects;
   }
 
-  function spacingLayoutSafe(subs) {
-    // Parent containers may overlap even when the English/Japanese text does not.
-    // Do not reject a useful line-height change based on the parent boxes.
-    const englishRects = textRectsWithin(subs);
-    const japanese = document.querySelector('#lln-translations');
-    if (japanese && getComputedStyle(japanese).display !== 'none') {
-      const translatedRects = textRectsWithin(japanese);
-      if (englishRects.some(a => translatedRects.some(b => intersects(a, b, 3)))) {
-        return false;
-      }
-    }
-    const word = subs.querySelector(WORD_SELECTOR);
-    if (!word) return true;
-    const bounds = labelBounds(word);
-    return englishRects.every(r =>
-      r.top >= bounds.top + 2 && r.bottom <= bounds.bottom - 2);
-  }
-
   // Annotations must never obscure either LR subtitle line (including the
   // Japanese translation) or native video captions. Hide only the annotation
   // if there is no room, leaving the subtitle fully readable.
@@ -345,17 +381,6 @@
       return;
     }
     lastLayoutAt = now;
-    const spacingRoot = document.querySelector(SUBS_SELECTOR);
-    if (spacingRoot?.classList.contains(SPACING_CLASS) &&
-        !spacingLayoutSafe(spacingRoot)) {
-      // Some LR layouts are top-anchored rather than bottom-anchored. Do not
-      // expand English lines when that would shift them over Japanese text.
-      spacingRoot.classList.remove(SPACING_CLASS);
-      spacingBlocked.add(spacingRoot);
-      lastLayoutAt = 0;
-      if (labels.size) rafId = requestAnimationFrame(positionLabels);
-      return;
-    }
     const protectedRects = subtitleTextRects();
     const placed = [];
     const entries = [...labels.entries()]
@@ -371,6 +396,7 @@
       .sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
     diagnostics.labels = entries.length;
     diagnostics.visible = 0;
+    diagnostics.inlineFallbacks = 0;
     diagnostics.collisionHidden = 0;
     diagnostics.offscreenHidden = 0;
     diagnostics.hiddenExamples = [];
@@ -378,6 +404,12 @@
 
     for (const { word, entry, rect } of entries) {
       const { label, meanings } = entry;
+      if (entry.inline?.isConnected) {
+        label.style.display = 'none';
+        diagnostics.inlineFallbacks++;
+        diagnostics.visible++;
+        continue;
+      }
       label.style.display = '';
       if (!rect.width || !rect.height) {
         label.style.display = 'none';
@@ -424,6 +456,13 @@
         }
       }
       if (!position) {
+        // Reserve room in normal subtitle flow instead of repeatedly hiding
+        // a legitimate translation behind the collision filter.
+        if (installInlineGloss(word, entry)) {
+          lastLayoutAt = 0;
+          if (labels.size) rafId = requestAnimationFrame(positionLabels);
+          return; // English line positions have changed; remeasure them.
+        }
         label.style.display = 'none';
         if (collision) diagnostics.collisionHidden++;
         else diagnostics.offscreenHidden++;
@@ -440,18 +479,8 @@
       label.style.top = position.top + 'px';
       diagnostics.visible++;
     }
-    // First give the English lines enough vertical room for compact glosses.
-    // Preserve the current position constraints; never overlay other subtitles
-    // merely to force a label visible. Reset spacing on the next subtitle cue.
+    diagnostics.extraLineSpacing = false;
     const subs = document.querySelector(SUBS_SELECTOR);
-    if (subs && diagnostics.labels > diagnostics.visible &&
-        !subs.classList.contains(SPACING_CLASS) && !spacingBlocked.has(subs) &&
-        isMultilineSubtitle(subs)) {
-      subs.classList.add(SPACING_CLASS);
-      lastLayoutAt = 0; // Re-measure after the layout has expanded.
-    }
-    diagnostics.extraLineSpacing = Boolean(subs?.classList.contains(SPACING_CLASS));
-    diagnostics.spacingBlocked = Boolean(subs && spacingBlocked.has(subs));
     if (subs) {
       const rows = [];
       for (const word of subs.querySelectorAll(WORD_SELECTOR)) {
@@ -486,15 +515,6 @@
     const seen = new Set();
     const statuses = [];
     for (const subs of document.querySelectorAll(SUBS_SELECTOR)) {
-      // A new subtitle cue gets a fresh compact layout. Only dense cues that
-      // actually fail collision avoidance expand their English line spacing.
-      const signature = [...subs.querySelectorAll(WORD_SELECTOR)].map(wordText).join(' ');
-      if (captionSignatures.get(subs) !== signature) {
-        captionSignatures.set(subs, signature);
-        subs.classList.remove(SPACING_CLASS);
-        spacingBlocked.delete(subs);
-        lastLayoutAt = 0;
-      }
       const layer = getLayer();
       for (const word of subs.querySelectorAll(WORD_SELECTOR)) {
         if (!isPurple(word)) continue;
@@ -551,7 +571,7 @@
         const entry = labels.get(word);
         const status = state.pending ? 'loading'
           : state.meanings?.length
-            ? (entry ? (entry.label.style.display === 'none' ? 'hidden-by-layout' : 'visible') : 'ready-to-display')
+            ? (entry ? (entry.inline?.isConnected ? 'inline-visible' : entry.label.style.display === 'none' ? 'hidden-by-layout' : 'visible') : 'ready-to-display')
             : state.lastError ? 'lookup-error'
             : state.lastEmptyAt ? 'empty-dictionary-retrying' : 'waiting';
         if (statuses.length < 40) {
