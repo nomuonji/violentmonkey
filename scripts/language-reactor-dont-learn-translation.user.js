@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Language Reactor Don't Learn Translations
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      2.3.0
+// @version      2.3.1
 // @description  Always show dictionary meanings above purple (Don't Learn) words in Language Reactor subtitles.
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -40,16 +40,18 @@
   const STYLE_ID = 'lr-dl-style';
 
   const RETRY_MS = 30000;
+  const EMPTY_RETRY_MS = 15000;
   const cache = new Map(); // "sl|form" -> Promise<string[]>
   const failedAt = new Map(); // "sl|form" -> timestamp of last failure
+  const emptyRetryAt = new Map(); // Empty dictionary responses are not permanent.
   let scanScheduled = false;
   let rafId = 0;
   let lastLayoutAt = 0;
   const inspectedWords = new WeakMap();
   const diagnostics = {
-    version: '2.3.0', scannedPurple: 0, labels: 0, visible: 0,
+    version: '2.3.1', scannedPurple: 0, labels: 0, visible: 0,
     collisionHidden: 0, offscreenHidden: 0, emptyDictionary: 0, lookupErrors: 0,
-    lastLayout: '', hiddenExamples: []
+    lastLayout: '', hiddenExamples: [], wordStatuses: []
   };
   if (typeof GM_registerMenuCommand === 'function') {
     GM_registerMenuCommand('LR 注釈: 表示診断', () => {
@@ -93,6 +95,8 @@
   function lookup(form, sourceLang) {
     const key = sourceLang + '|' + form;
     if (cache.has(key)) return cache.get(key);
+    // A temporary empty response is not a permanent no-translation verdict.
+    if (Date.now() < (emptyRetryAt.get(key) || 0)) return Promise.resolve([]);
     if (Date.now() - (failedAt.get(key) || 0) < RETRY_MS) {
       return Promise.reject(new Error('cooling down'));
     }
@@ -107,7 +111,14 @@
         const cleaned = entries
           .map(entry => String(entry).replace(/\s*\([\x20-\x7E]*\)\s*$/, '').trim())
           .filter(Boolean);
-        return [...new Set(cleaned)];
+        const unique = [...new Set(cleaned)];
+        if (!unique.length) {
+          cache.delete(key);
+          emptyRetryAt.set(key, Date.now() + EMPTY_RETRY_MS);
+        } else {
+          emptyRetryAt.delete(key);
+        }
+        return unique;
       })
       .catch(error => {
         cache.delete(key); // Allow a retry after the cooldown.
@@ -363,9 +374,23 @@
   }
 
   // ---- Scan --------------------------------------------------------------
+
+  // Prefer LR's keyed form, but try the displayed form when they differ:
+  // data-word-key may refer to a normalized form with no dictionary entry.
+  async function lookupWord(info, visibleForm) {
+    const meanings = await lookup(info.form, info.sourceLang);
+    if (meanings.length) return meanings;
+    const alternate = visibleForm.replace(/^[^\\p{L}\\p{N}]+|[^\\p{L}\\p{N}]+$/gu, '').toLowerCase();
+    if (alternate && alternate !== info.form) {
+      return lookup(alternate, info.sourceLang);
+    }
+    return [];
+  }
+
   function scan() {
     addStyles();
     const seen = new Set();
+    const statuses = [];
     for (const subs of document.querySelectorAll(SUBS_SELECTOR)) {
       const layer = getLayer();
       for (const word of subs.querySelectorAll(WORD_SELECTOR)) {
@@ -376,38 +401,71 @@
         const key = info.sourceLang + '|' + info.form;
         let state = inspectedWords.get(word);
         if (!state || state.key !== key) {
-          state = { key, meanings: null, pending: false, retryAt: 0 };
+          state = {
+            key, meanings: null, pending: false, retryAt: 0,
+            lastError: '', lastEmptyAt: 0
+          };
           inspectedWords.set(word, state);
         }
         state.lastSeenAt = Date.now();
+        const displayedWord = wordText(word);
         if (state.meanings?.length) {
           if (!labels.has(word)) setLabel(word, layer, state.meanings);
         } else if (!state.pending && state.meanings === null && Date.now() >= state.retryAt) {
           state.pending = true;
-          lookup(info.form, info.sourceLang).then(meanings => {
-            state.pending = false;
-            state.meanings = meanings;
+          const activeState = state;
+          lookupWord(info, displayedWord).then(meanings => {
+            activeState.pending = false;
+            if (inspectedWords.get(word) !== activeState) return;
             if (!meanings.length) {
+              activeState.meanings = null;
+              activeState.retryAt = Date.now() + EMPTY_RETRY_MS;
+              activeState.lastEmptyAt = Date.now();
               diagnostics.emptyDictionary++;
+              scheduleScan();
               return;
             }
-            if (!word.isConnected || !word.closest(SUBS_SELECTOR) || !isPurple(word)) return;
-            setLabel(word, getLayer(), meanings);
-            ensurePositioning();
-          }, () => {
-            state.pending = false;
-            state.retryAt = Date.now() + RETRY_MS;
+            activeState.meanings = meanings;
+            activeState.lastEmptyAt = 0;
+            activeState.lastError = '';
+            if (word.isConnected && word.closest(SUBS_SELECTOR) && isPurple(word)) {
+              setLabel(word, getLayer(), meanings);
+              ensurePositioning();
+            } else {
+              // The word may have been recolored while the request was pending.
+              // A later scan can reattach this already-retrieved meaning.
+              scheduleScan();
+            }
+          }, error => {
+            activeState.pending = false;
+            if (inspectedWords.get(word) !== activeState) return;
+            activeState.retryAt = Date.now() + RETRY_MS;
+            activeState.lastError = String(error?.message || error);
             diagnostics.lookupErrors++;
+            scheduleScan();
+          });
+        }
+        const entry = labels.get(word);
+        const status = state.pending ? 'loading'
+          : state.meanings?.length
+            ? (entry ? (entry.label.style.display === 'none' ? 'hidden-by-layout' : 'visible') : 'ready-to-display')
+            : state.lastError ? 'lookup-error'
+            : state.lastEmptyAt ? 'empty-dictionary-retrying' : 'waiting';
+        if (statuses.length < 40) {
+          statuses.push({
+            word: displayedWord.slice(0, 32),
+            status,
+            retrySeconds: state.retryAt > Date.now()
+              ? Math.ceil((state.retryAt - Date.now()) / 1000) : 0
           });
         }
       }
     }
     diagnostics.scannedPurple = seen.size;
+    diagnostics.wordStatuses = statuses;
     for (const word of [...labels.keys()]) {
       if (seen.has(word)) continue;
       const state = inspectedWords.get(word);
-      // LR sometimes temporarily removes a word's purple styling during
-      // subtitle updates. Avoid flashing a visible gloss off immediately.
       if (word.isConnected && word.closest(SUBS_SELECTOR) &&
           Date.now() - (state?.lastSeenAt || 0) < 350) {
         scheduleScan();
@@ -443,5 +501,8 @@
     attributes: true,
     attributeFilter: ['style', 'class', 'data-word-key']
   });
+  // LR sometimes replaces the subtitle DOM without a relevant mutation,
+  // and empty dictionary results must eventually be retried.
+  setInterval(scheduleScan, 2000);
   scan();
 })();
