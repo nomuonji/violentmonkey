@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Language Reactor Don't Learn Translations
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      2.1.0
+// @version      2.1.1
 // @description  Always show dictionary meanings above purple (Don't Learn) words in Language Reactor subtitles.
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -279,23 +279,34 @@
         continue;
       }
 
-      const centerX = Math.max(bounds.left + width / 2 + margin,
-        Math.min(bounds.right - width / 2 - margin, rect.left + rect.width / 2));
-      const left = centerX - width / 2;
+      const wordCenterX = rect.left + rect.width / 2;
+      const minCenterX = bounds.left + width / 2 + margin;
+      const maxCenterX = bounds.right - width / 2 - margin;
+      const maxVerticalGap = 38; // Distance between the word and the closest label edge.
+      const maxHorizontalDrift = 36;
       let position = null;
-      // Try the nearest lane above the word, then below, then the next pair.
-      // Limit the distance so a label never floats far from its own word.
-      for (let lane = 0; lane < 9 && !position; lane++) {
+
+      // Keep each annotation visibly attached to its own word. The previous
+      // 9-lane search could send labels several lines above their source words.
+      // Prefer a tiny sideways move over another vertical row; if no nearby
+      // collision-free space exists, hide the label rather than let it float.
+      for (let lane = 0; lane < 2 && !position; lane++) {
+        const gap = margin + lane * (height + margin);
+        if (gap > maxVerticalGap) break;
         for (const above of [true, false]) {
-          const top = above
-            ? rect.top - height - margin - lane * (height + margin)
-            : rect.bottom + margin + lane * (height + margin);
+          const top = above ? rect.top - height - gap : rect.bottom + gap;
           if (top < bounds.top + margin || top + height > bounds.bottom - margin) continue;
-          const box = { left, right: left + width, top, bottom: top + height };
-          if (protectedRects.some(other => intersects(box, other, 3))) continue;
-          if (placed.some(other => intersects(box, other, 4))) continue;
-          position = box;
-          break;
+          for (const offset of [0, -12, 12, -24, 24, -36, 36]) {
+            const centerX = Math.max(minCenterX, Math.min(maxCenterX, wordCenterX + offset));
+            if (Math.abs(centerX - wordCenterX) > maxHorizontalDrift) continue;
+            const left = centerX - width / 2;
+            const box = { left, right: left + width, top, bottom: top + height };
+            if (protectedRects.some(other => intersects(box, other, 3))) continue;
+            if (placed.some(other => intersects(box, other, 4))) continue;
+            position = box;
+            break;
+          }
+          if (position) break;
         }
       }
 
@@ -305,7 +316,7 @@
       }
       const layerRect = label.parentElement.getBoundingClientRect();
       placed.push(position);
-      label.style.left = (centerX - layerRect.left) + 'px';
+      label.style.left = ((position.left + position.right) / 2 - layerRect.left) + 'px';
       label.style.top = (position.top - layerRect.top) + 'px';
     }
     if (labels.size) rafId = requestAnimationFrame(positionLabels);
