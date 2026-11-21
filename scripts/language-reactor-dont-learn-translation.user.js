@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Language Reactor Don't Learn Translations
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      2.1.1
+// @version      2.2.0
 // @description  Always show dictionary meanings above purple (Don't Learn) words in Language Reactor subtitles.
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -34,7 +34,6 @@
   // ---- Constants ---------------------------------------------------------
   const SUBS_SELECTOR = '#lln-subs';
   const WORD_SELECTOR = '.lln-word';
-  const LAYER_CLASS = 'lr-dl-layer';
   const LABEL_CLASS = 'lr-dl-label';
   const STYLE_ID = 'lr-dl-style';
 
@@ -135,13 +134,11 @@
     const style = document.createElement('style');
     style.id = STYLE_ID;
     style.textContent = `
-      .${LAYER_CLASS} {
-        position: absolute; left: 0; top: 0; width: 0; height: 0;
-        overflow: visible; pointer-events: none; z-index: 2147483000;
-      }
       .${LABEL_CLASS} {
-        position: absolute; transform: translateX(-50%);
-        max-width: 22em; padding: 2px 7px; border-radius: 4px;
+        position: absolute; left: 50%; bottom: calc(100% + 4px);
+        transform: translateX(-50%); z-index: 2147483000;
+        box-sizing: border-box; pointer-events: none;
+        max-width: min(22em, 70vw); padding: 2px 7px; border-radius: 4px;
         background: rgba(20, 20, 24, 0.92); color: #fff;
         border-bottom: 2px solid rgb(184, 148, 197);
         font: 600 clamp(11px, 0.45em, 18px)/1.35 system-ui, sans-serif;
@@ -152,29 +149,19 @@
     (document.head || document.documentElement).appendChild(style);
   }
 
-  function getLayer(subs) {
-    const host = subs.parentElement;
-    if (!host) return null;
-    let layer = host.querySelector(':scope > .' + LAYER_CLASS);
-    if (!layer) {
-      layer = document.createElement('div');
-      layer.className = LAYER_CLASS;
-      host.appendChild(layer);
-    }
-    return layer;
-  }
 
-  // Each label is bound to one word element; LR replaces word nodes when the
-  // subtitle line changes, which drops their labels automatically.
-  const labels = new Map(); // word element -> { label, text }
-
-  function setLabel(word, layer, text) {
+  // Bind annotations to their word spans so CSS transforms apply equally.
+  const labels = new Map(); // word -> { label, text }
+  function setLabel(word, text) {
     let entry = labels.get(word);
-    if (!entry || entry.label.parentElement !== layer) {
+    if (!entry || entry.label.parentElement !== word) {
       entry?.label.remove();
-      const label = document.createElement('div');
+      if (getComputedStyle(word).position === 'static') word.style.position = 'relative';
+      const label = document.createElement('span');
       label.className = LABEL_CLASS;
-      layer.appendChild(label);
+      label.setAttribute('aria-hidden', 'true');
+      label.style.visibility = 'hidden';
+      word.appendChild(label);
       entry = { label, text: '' };
       labels.set(word, entry);
     }
@@ -203,7 +190,7 @@
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
       let node;
       while ((node = walker.nextNode())) {
-        if (!node.textContent.trim() || node.parentElement?.closest('.' + LAYER_CLASS)) continue;
+        if (!node.textContent.trim() || node.parentElement?.closest('.' + LABEL_CLASS)) continue;
         range.selectNodeContents(node);
         for (const rect of range.getClientRects()) {
           if (rect.width > 0 && rect.height > 0) {
@@ -241,9 +228,8 @@
       a.top < b.bottom + padding && a.bottom > b.top - padding;
   }
 
-  // Annotations must never obscure either LR subtitle line (including the
-  // Japanese translation) or native video captions. Hide only the annotation
-  // if there is no room, leaving the subtitle fully readable.
+
+  // Read actual browser geometry; no viewport-to-overlay coordinate conversion.
   function positionLabels(now) {
     rafId = 0;
     if (now - lastLayoutAt < 90) {
@@ -255,69 +241,36 @@
     const placed = [];
     const entries = [...labels.entries()]
       .filter(([word, { label }]) => {
-        if (word.isConnected && label.isConnected) return true;
+        if (word.isConnected && label.parentElement === word) return true;
         label.remove();
         labels.delete(word);
         return false;
       })
-      .map(([word, { label }]) => ({ word, label, rect: word.getBoundingClientRect() }))
-      .sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+      .sort(([a], [b]) =>
+        a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
 
-    for (const { word, label, rect } of entries) {
-      label.style.display = '';
-      if (!rect.width || !rect.height) {
-        label.style.display = 'none';
-        continue;
-      }
-
+    for (const [word, { label }] of entries) {
+      label.style.visibility = 'hidden';
+      const wordRect = word.getBoundingClientRect();
+      if (!wordRect.width || !wordRect.height) continue;
       const bounds = labelBounds(word);
-      const width = label.offsetWidth;
-      const height = label.offsetHeight;
-      const margin = 5;
-      if (!width || !height || width + margin * 2 > bounds.right - bounds.left) {
-        label.style.display = 'none';
-        continue;
+      // Keep the annotation directly above the word. Small horizontal
+      // offsets can avoid neighbors, but never send it to another line.
+      for (const shift of [0, -12, 12, -24, 24]) {
+        label.style.marginLeft = shift + 'px';
+        const rect = label.getBoundingClientRect();
+        if (!rect.width || !rect.height) continue;
+        const gap = wordRect.top - rect.bottom;
+        const drift = Math.abs((rect.left + rect.right - wordRect.left - wordRect.right) / 2);
+        if (gap < -2 || gap > 16 || drift > 32) continue;
+        if (rect.left < bounds.left + 2 || rect.right > bounds.right - 2 ||
+            rect.top < bounds.top + 2 || rect.bottom > bounds.bottom - 2) continue;
+        if (protectedRects.some(other => intersects(rect, other, 2))) continue;
+        if (placed.some(other => intersects(rect, other, 4))) continue;
+        placed.push(rect);
+        label.style.visibility = 'visible';
+        break;
       }
-
-      const wordCenterX = rect.left + rect.width / 2;
-      const minCenterX = bounds.left + width / 2 + margin;
-      const maxCenterX = bounds.right - width / 2 - margin;
-      const maxVerticalGap = 38; // Distance between the word and the closest label edge.
-      const maxHorizontalDrift = 36;
-      let position = null;
-
-      // Keep each annotation visibly attached to its own word. The previous
-      // 9-lane search could send labels several lines above their source words.
-      // Prefer a tiny sideways move over another vertical row; if no nearby
-      // collision-free space exists, hide the label rather than let it float.
-      for (let lane = 0; lane < 2 && !position; lane++) {
-        const gap = margin + lane * (height + margin);
-        if (gap > maxVerticalGap) break;
-        for (const above of [true, false]) {
-          const top = above ? rect.top - height - gap : rect.bottom + gap;
-          if (top < bounds.top + margin || top + height > bounds.bottom - margin) continue;
-          for (const offset of [0, -12, 12, -24, 24, -36, 36]) {
-            const centerX = Math.max(minCenterX, Math.min(maxCenterX, wordCenterX + offset));
-            if (Math.abs(centerX - wordCenterX) > maxHorizontalDrift) continue;
-            const left = centerX - width / 2;
-            const box = { left, right: left + width, top, bottom: top + height };
-            if (protectedRects.some(other => intersects(box, other, 3))) continue;
-            if (placed.some(other => intersects(box, other, 4))) continue;
-            position = box;
-            break;
-          }
-          if (position) break;
-        }
-      }
-
-      if (!position) {
-        label.style.display = 'none';
-        continue;
-      }
-      const layerRect = label.parentElement.getBoundingClientRect();
-      placed.push(position);
-      label.style.left = ((position.left + position.right) / 2 - layerRect.left) + 'px';
-      label.style.top = (position.top - layerRect.top) + 'px';
     }
     if (labels.size) rafId = requestAnimationFrame(positionLabels);
   }
@@ -331,18 +284,16 @@
     addStyles();
     const seen = new Set();
     for (const subs of document.querySelectorAll(SUBS_SELECTOR)) {
-      const layer = getLayer(subs);
-      if (!layer) continue;
       for (const word of subs.querySelectorAll(WORD_SELECTOR)) {
         if (!isPurple(word)) continue;
         const info = wordInfo(word);
         if (!info) continue;
         seen.add(word);
-        if (!labels.has(word)) setLabel(word, layer, '…');
+        if (!labels.has(word)) setLabel(word, '…');
         lookup(info.form, info.sourceLang).then(
           meanings => {
             if (!word.isConnected || !labels.has(word)) return;
-            if (meanings.length) setLabel(word, layer, meanings.slice(0, MAX_MEANINGS).join('・'));
+            if (meanings.length) setLabel(word, meanings.slice(0, MAX_MEANINGS).join('・'));
             else removeLabel(word);
           },
           () => { if (labels.has(word)) removeLabel(word); }
@@ -364,14 +315,19 @@
     }, 50);
   }
 
+
   new MutationObserver(mutations => {
-    // Ignore our own label updates.
     for (const m of mutations) {
       const target = m.target.nodeType === 1 ? m.target : m.target.parentElement;
-      if (!target?.closest?.('.' + LAYER_CLASS)) {
-        scheduleScan();
-        return;
+      if (target?.closest?.('.' + LABEL_CLASS)) continue;
+      if (m.type === 'childList') {
+        const children = [...m.addedNodes, ...m.removedNodes];
+        if (children.length && children.every(node =>
+          node.nodeType === Node.ELEMENT_NODE && node.classList.contains(LABEL_CLASS)
+        )) continue;
       }
+      scheduleScan();
+      return;
     }
   }).observe(document.documentElement, {
     childList: true,
