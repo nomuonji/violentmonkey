@@ -50,6 +50,7 @@
   let lastLayoutAt = 0;
   const inspectedWords = new WeakMap();
   const captionSignatures = new WeakMap();
+  const spacingBlocked = new WeakSet();
   const diagnostics = {
     version: '2.3.1', scannedPurple: 0, labels: 0, visible: 0,
     collisionHidden: 0, offscreenHidden: 0, emptyDictionary: 0, lookupErrors: 0,
@@ -291,6 +292,18 @@
     return false;
   }
 
+  function spacingLayoutSafe(subs) {
+    const english = subs.getBoundingClientRect();
+    const japanese = document.querySelector('#lln-translations');
+    if (japanese && getComputedStyle(japanese).display !== 'none') {
+      const translated = japanese.getBoundingClientRect();
+      if (translated.width && translated.height &&
+          intersects(english, translated, 5)) return false;
+    }
+    const word = subs.querySelector(WORD_SELECTOR);
+    return !word || english.top >= labelBounds(word).top + 4;
+  }
+
   // Annotations must never obscure either LR subtitle line (including the
   // Japanese translation) or native video captions. Hide only the annotation
   // if there is no room, leaving the subtitle fully readable.
@@ -301,6 +314,17 @@
       return;
     }
     lastLayoutAt = now;
+    const spacingRoot = document.querySelector(SUBS_SELECTOR);
+    if (spacingRoot?.classList.contains(SPACING_CLASS) &&
+        !spacingLayoutSafe(spacingRoot)) {
+      // Some LR layouts are top-anchored rather than bottom-anchored. Do not
+      // expand English lines when that would shift them over Japanese text.
+      spacingRoot.classList.remove(SPACING_CLASS);
+      spacingBlocked.add(spacingRoot);
+      lastLayoutAt = 0;
+      if (labels.size) rafId = requestAnimationFrame(positionLabels);
+      return;
+    }
     const protectedRects = subtitleTextRects();
     const placed = [];
     const entries = [...labels.entries()]
@@ -390,7 +414,8 @@
     // merely to force a label visible. Reset spacing on the next subtitle cue.
     const subs = document.querySelector(SUBS_SELECTOR);
     if (subs && diagnostics.labels > diagnostics.visible &&
-        !subs.classList.contains(SPACING_CLASS) && isMultilineSubtitle(subs)) {
+        !subs.classList.contains(SPACING_CLASS) && !spacingBlocked.has(subs) &&
+        isMultilineSubtitle(subs)) {
       subs.classList.add(SPACING_CLASS);
       lastLayoutAt = 0; // Re-measure after the layout has expanded.
     }
@@ -427,6 +452,7 @@
       if (captionSignatures.get(subs) !== signature) {
         captionSignatures.set(subs, signature);
         subs.classList.remove(SPACING_CLASS);
+        spacingBlocked.delete(subs);
         lastLayoutAt = 0;
       }
       const layer = getLayer();
