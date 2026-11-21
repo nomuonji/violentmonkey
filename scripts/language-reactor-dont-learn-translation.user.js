@@ -105,8 +105,8 @@
     });
     const promise = request(DICT_URL + '?' + params)
       .then(json => {
-        const entries = json?.data?.hoverDictEntries;
-        if (!Array.isArray(entries)) return [];
+        const entries = Array.isArray(json?.data?.hoverDictEntries)
+          ? json.data.hoverDictEntries : [];
         // Drop romanization like "得る (eru)" and duplicates it leaves behind.
         const cleaned = entries
           .map(entry => String(entry).replace(/\s*\([\x20-\x7E]*\)\s*$/, '').trim())
