@@ -380,7 +380,7 @@
   async function lookupWord(info, visibleForm) {
     const meanings = await lookup(info.form, info.sourceLang);
     if (meanings.length) return meanings;
-    const alternate = visibleForm.replace(/^[^\\p{L}\\p{N}]+|[^\\p{L}\\p{N}]+$/gu, '').toLowerCase();
+    const alternate = visibleForm.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '').toLowerCase();
     if (alternate && alternate !== info.form) {
       return lookup(alternate, info.sourceLang);
     }
