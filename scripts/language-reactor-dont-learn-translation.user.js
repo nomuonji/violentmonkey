@@ -43,6 +43,7 @@
   const failedAt = new Map(); // "sl|form" -> timestamp of last failure
   let scanScheduled = false;
   let rafId = 0;
+  let lastLayoutAt = 0;
 
   // ---- Dictionary --------------------------------------------------------
   function request(url) {
