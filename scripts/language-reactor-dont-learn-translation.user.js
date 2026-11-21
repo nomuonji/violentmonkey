@@ -213,6 +213,9 @@
   function setLabel(word, layer, meanings) {
     let entry = labels.get(word);
     if (!entry || entry.label.parentElement !== layer) {
+      // Fullscreen may replace the fixed overlay host. Clean up any inline
+      // fallback before rebuilding the entry so style reservations don't leak.
+      if (entry) removeInlineGloss(word, entry);
       entry?.label.remove();
       const label = document.createElement('div');
       label.className = LABEL_CLASS;
