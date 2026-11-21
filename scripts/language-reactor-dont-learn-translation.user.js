@@ -171,7 +171,7 @@
       .${INLINE_CLASS} {
         position: absolute; top: 1px; left: 50%;
         transform: translateX(-50%); box-sizing: border-box;
-        max-width: 200px; white-space: nowrap; overflow: hidden;
+        width: max-content; max-width: 200px; white-space: nowrap; overflow: hidden;
         text-overflow: ellipsis; border-radius: 3px; padding: 1px 4px;
         background: rgba(20, 20, 24, 0.96); color: white !important;
         border-bottom: 1px solid rgb(184, 148, 197);
