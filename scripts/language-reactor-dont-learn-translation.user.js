@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Language Reactor Don't Learn Translations
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      2.0.0
+// @version      2.1.0
 // @description  Always show dictionary meanings above purple (Don't Learn) words in Language Reactor subtitles.
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -188,8 +188,69 @@
     labels.delete(word);
   }
 
-  function positionLabels() {
+  // Read actual glyph bounds, not the subtitle container's bounding box:
+  // the container includes empty areas where labels can safely be placed.
+  function subtitleTextRects() {
+    const rects = [];
+    const roots = document.querySelectorAll(
+      SUBS_SELECTOR + ', .ytp-caption-window-container, .player-timedtext, .vjs-text-track-display'
+    );
+    const range = document.createRange();
+    for (const root of roots) {
+      const style = getComputedStyle(root);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        if (!node.textContent.trim() || node.parentElement?.closest('.' + LAYER_CLASS)) continue;
+        range.selectNodeContents(node);
+        for (const rect of range.getClientRects()) {
+          if (rect.width > 0 && rect.height > 0) {
+            rects.push({ left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom });
+          }
+        }
+      }
+    }
+    range.detach?.();
+    return rects;
+  }
+
+  function labelBounds(word) {
+    const player = word.closest(
+      '#movie_player, .html5-video-player, .watch-video--player-view, .nf-player-container'
+    );
+    const video = player?.querySelector('video') || document.querySelector('video');
+    const videoRect = video?.getBoundingClientRect();
+    const viewport = {
+      left: 0, top: 0, right: document.documentElement.clientWidth,
+      bottom: document.documentElement.clientHeight
+    };
+    if (!videoRect || videoRect.width < 200 || videoRect.height < 100) return viewport;
+    const bounds = {
+      left: Math.max(viewport.left, videoRect.left),
+      top: Math.max(viewport.top, videoRect.top),
+      right: Math.min(viewport.right, videoRect.right),
+      bottom: Math.min(viewport.bottom, videoRect.bottom)
+    };
+    return bounds.right > bounds.left && bounds.bottom > bounds.top ? bounds : viewport;
+  }
+
+  function intersects(a, b, padding = 0) {
+    return a.left < b.right + padding && a.right > b.left - padding &&
+      a.top < b.bottom + padding && a.bottom > b.top - padding;
+  }
+
+  // Annotations must never obscure either LR subtitle line (including the
+  // Japanese translation) or native video captions. Hide only the annotation
+  // if there is no room, leaving the subtitle fully readable.
+  function positionLabels(now) {
     rafId = 0;
+    if (now - lastLayoutAt < 90) {
+      if (labels.size) rafId = requestAnimationFrame(positionLabels);
+      return;
+    }
+    lastLayoutAt = now;
+    const protectedRects = subtitleTextRects();
     const placed = [];
     const entries = [...labels.entries()]
       .filter(([word, { label }]) => {
@@ -201,32 +262,50 @@
       .map(([word, { label }]) => ({ word, label, rect: word.getBoundingClientRect() }))
       .sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
 
-    for (const { label, rect } of entries) {
-      const layerRect = label.parentElement.getBoundingClientRect();
-      if (!rect.width) {
+    for (const { word, label, rect } of entries) {
+      label.style.display = '';
+      if (!rect.width || !rect.height) {
         label.style.display = 'none';
         continue;
       }
-      label.style.display = '';
+
+      const bounds = labelBounds(word);
       const width = label.offsetWidth;
       const height = label.offsetHeight;
-      const centerX = rect.left + rect.width / 2;
-      let top = rect.top - height - 2;
-      // Lift labels that would overlap a label already placed on this line.
-      for (let moved = true; moved;) {
-        moved = false;
-        for (const other of placed) {
-          const overlapX = Math.abs(other.centerX - centerX) < (other.width + width) / 2 + 4;
-          const overlapY = top < other.top + other.height && top + height > other.top;
-          if (overlapX && overlapY) {
-            top = other.top - height - 2;
-            moved = true;
-          }
+      const margin = 5;
+      if (!width || !height || width + margin * 2 > bounds.right - bounds.left) {
+        label.style.display = 'none';
+        continue;
+      }
+
+      const centerX = Math.max(bounds.left + width / 2 + margin,
+        Math.min(bounds.right - width / 2 - margin, rect.left + rect.width / 2));
+      const left = centerX - width / 2;
+      let position = null;
+      // Try the nearest lane above the word, then below, then the next pair.
+      // Limit the distance so a label never floats far from its own word.
+      for (let lane = 0; lane < 9 && !position; lane++) {
+        for (const above of [true, false]) {
+          const top = above
+            ? rect.top - height - margin - lane * (height + margin)
+            : rect.bottom + margin + lane * (height + margin);
+          if (top < bounds.top + margin || top + height > bounds.bottom - margin) continue;
+          const box = { left, right: left + width, top, bottom: top + height };
+          if (protectedRects.some(other => intersects(box, other, 3))) continue;
+          if (placed.some(other => intersects(box, other, 4))) continue;
+          position = box;
+          break;
         }
       }
-      placed.push({ centerX, top, width, height });
+
+      if (!position) {
+        label.style.display = 'none';
+        continue;
+      }
+      const layerRect = label.parentElement.getBoundingClientRect();
+      placed.push(position);
       label.style.left = (centerX - layerRect.left) + 'px';
-      label.style.top = (top - layerRect.top) + 'px';
+      label.style.top = (position.top - layerRect.top) + 'px';
     }
     if (labels.size) rafId = requestAnimationFrame(positionLabels);
   }
