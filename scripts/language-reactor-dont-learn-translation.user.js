@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Language Reactor Don't Learn Translations
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      2.4.0
+// @version      2.4.1
 // @description  Always show dictionary meanings above purple (Don't Learn) words in Language Reactor subtitles.
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -52,9 +52,10 @@
   const captionSignatures = new WeakMap();
   const spacingBlocked = new WeakSet();
   const diagnostics = {
-    version: '2.3.1', scannedPurple: 0, labels: 0, visible: 0,
+    version: '2.4.1', scannedPurple: 0, labels: 0, visible: 0,
     collisionHidden: 0, offscreenHidden: 0, emptyDictionary: 0, lookupErrors: 0,
-    lastLayout: '', hiddenExamples: [], wordStatuses: [], extraLineSpacing: false
+    lastLayout: '', hiddenExamples: [], wordStatuses: [], extraLineSpacing: false,
+    spacingBlocked: false, captionRows: 0
   };
   if (typeof GM_registerMenuCommand === 'function') {
     GM_registerMenuCommand('LR 注釈: 表示診断', () => {
@@ -169,9 +170,11 @@
       }
       /* Reserve space for glosses only when a dense, multi-line subtitle
          actually hides one. The Japanese translation stays unmodified. */
+      /* LR can set line-height on nested caption blocks, overriding its root.
+         Expand the actual text rows, not only the root and each word. */
       #lln-subs.${SPACING_CLASS},
-      #lln-subs.${SPACING_CLASS} .lln-word {
-        line-height: 2.05 !important;
+      #lln-subs.${SPACING_CLASS} *:not(.${LABEL_CLASS}) {
+        line-height: 2.15 !important;
       }
       .${LABEL_CLASS} {
         position: absolute; transform: translateX(-50%);
@@ -292,16 +295,44 @@
     return false;
   }
 
+  function textRectsWithin(root) {
+    if (!root) return [];
+    const rects = [];
+    const range = document.createRange();
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode())) {
+      if (!node.textContent.trim() || node.parentElement?.closest('.' + LAYER_CLASS)) continue;
+      const el = node.parentElement;
+      if (!el || getComputedStyle(el).display === 'none' ||
+          getComputedStyle(el).visibility === 'hidden') continue;
+      range.selectNodeContents(node);
+      for (const r of range.getClientRects()) {
+        if (r.width > 0 && r.height > 0) {
+          rects.push({ left: r.left, top: r.top, right: r.right, bottom: r.bottom });
+        }
+      }
+    }
+    range.detach?.();
+    return rects;
+  }
+
   function spacingLayoutSafe(subs) {
-    const english = subs.getBoundingClientRect();
+    // Parent containers may overlap even when the English/Japanese text does not.
+    // Do not reject a useful line-height change based on the parent boxes.
+    const englishRects = textRectsWithin(subs);
     const japanese = document.querySelector('#lln-translations');
     if (japanese && getComputedStyle(japanese).display !== 'none') {
-      const translated = japanese.getBoundingClientRect();
-      if (translated.width && translated.height &&
-          intersects(english, translated, 5)) return false;
+      const translatedRects = textRectsWithin(japanese);
+      if (englishRects.some(a => translatedRects.some(b => intersects(a, b, 3)))) {
+        return false;
+      }
     }
     const word = subs.querySelector(WORD_SELECTOR);
-    return !word || english.top >= labelBounds(word).top + 4;
+    if (!word) return true;
+    const bounds = labelBounds(word);
+    return englishRects.every(r =>
+      r.top >= bounds.top + 2 && r.bottom <= bounds.bottom - 2);
   }
 
   // Annotations must never obscure either LR subtitle line (including the
@@ -420,6 +451,15 @@
       lastLayoutAt = 0; // Re-measure after the layout has expanded.
     }
     diagnostics.extraLineSpacing = Boolean(subs?.classList.contains(SPACING_CLASS));
+    diagnostics.spacingBlocked = Boolean(subs && spacingBlocked.has(subs));
+    if (subs) {
+      const rows = [];
+      for (const word of subs.querySelectorAll(WORD_SELECTOR)) {
+        const r = word.getBoundingClientRect();
+        if (r.height && !rows.some(y => Math.abs(y - r.top) < 8)) rows.push(r.top);
+      }
+      diagnostics.captionRows = rows.length;
+    }
     if (labels.size) rafId = requestAnimationFrame(positionLabels);
   }
 
