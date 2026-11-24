@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Language Reactor Don't Learn Translations
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      2.6.0
+// @version      2.7.0
 // @description  Always show dictionary meanings above purple (Don't Learn) words in Language Reactor subtitles.
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -38,7 +38,6 @@
   const LAYER_CLASS = 'lr-dl-layer';
   const LABEL_CLASS = 'lr-dl-label';
   const STYLE_ID = 'lr-dl-style';
-  const BACKDROP_CLASS = 'lr-subtitle-bottom-backdrop';
   const INLINE_CLASS = 'lr-dl-inline-gloss';
   const captionSnapshots = new Map();
   let captionHoldSuspended = false;
@@ -53,7 +52,7 @@
   let lastLayoutAt = 0;
   const inspectedWords = new WeakMap();
   const diagnostics = {
-    version: '2.6.0', scannedPurple: 0, labels: 0, visible: 0,
+    version: '2.7.0', scannedPurple: 0, labels: 0, visible: 0,
     collisionHidden: 0, offscreenHidden: 0, emptyDictionary: 0, lookupErrors: 0,
     lastLayout: '', hiddenExamples: [], wordStatuses: [], extraLineSpacing: false,
     inlineFallbacks: 0, captionRows: 0
@@ -169,10 +168,15 @@
         position: fixed; left: 0; top: 0; width: 0; height: 0;
         overflow: visible; pointer-events: none; z-index: 2147483000;
       }
-      .${BACKDROP_CLASS} {
-        position: fixed; left: 0; width: 100vw; display: none;
-        pointer-events: none; z-index: 2147482998;
-        background: linear-gradient(180deg, rgba(0, 0, 0, 0.38), rgba(0, 0, 0, 0.82));
+      /* Expand Language Reactor's own subtitle background, preserving its color
+         and opacity setting instead of painting a separate overlay. */
+      #lln-subs {
+        width: 100% !important;
+      }
+      #lln-subs > .lln-subs-text {
+        display: block !important;
+        width: 100% !important;
+        box-sizing: border-box !important;
       }
       /* A last-resort interlinear note reserves room in the English line box.
          Unlike the fixed overlay, this note participates in line layout. */
@@ -225,58 +229,6 @@
     }
   }
 
-  function visibleTextRects(root) {
-    if (!root) return [];
-    const range = document.createRange();
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    const rects = [];
-    let node;
-    while ((node = walker.nextNode())) {
-      if (!node.textContent.trim()) continue;
-      range.selectNodeContents(node);
-      for (const rect of range.getClientRects()) {
-        if (rect.width && rect.height) rects.push(rect);
-      }
-    }
-    range.detach?.();
-    return rects;
-  }
-
-  function positionBottomBackdrop() {
-    const video = document.querySelector('video');
-    const subs = document.querySelector(SUBS_SELECTOR);
-    const backdrop = document.querySelector('.' + BACKDROP_CLASS);
-    if (!video || !subs || !backdrop || !captionHostVisible(subs)) {
-      if (backdrop) backdrop.style.display = 'none';
-      return;
-    }
-    const videoRect = video.getBoundingClientRect();
-    if (videoRect.width < 200 || videoRect.height < 100) {
-      backdrop.style.display = 'none';
-      return;
-    }
-    const english = subs.querySelector('.lln-subs-text') || subs;
-    const translation = document.querySelector('#lln-translations');
-    const textRects = visibleTextRects(english);
-    if (translation && captionHostVisible(translation)) {
-      textRects.push(...visibleTextRects(translation));
-    }
-    if (!textRects.length) {
-      backdrop.style.display = 'none';
-      return;
-    }
-    const viewportHeight = document.documentElement.clientHeight;
-    const top = Math.max(0, Math.min(...textRects.map(rect => rect.top)) - 22);
-    const bottom = Math.min(viewportHeight, videoRect.bottom);
-    if (bottom <= top) {
-      backdrop.style.display = 'none';
-      return;
-    }
-    backdrop.style.top = top + 'px';
-    backdrop.style.height = (bottom - top) + 'px';
-    backdrop.style.display = 'block';
-  }
-
   // Screen-space coordinates and CSS placement must share one coordinate system.
   // The old layer lived inside a transformed subtitle container, so positions
   // computed in viewport pixels were scaled/translated a second time.
@@ -289,12 +241,6 @@
       layer.className = LAYER_CLASS;
     }
     if (layer.parentElement !== host) host.appendChild(layer);
-    let backdrop = host.querySelector('.' + BACKDROP_CLASS);
-    if (!backdrop) {
-      backdrop = document.createElement('div');
-      backdrop.className = BACKDROP_CLASS;
-      host.appendChild(backdrop);
-    }
     return layer;
   }
 
@@ -476,7 +422,6 @@
       return;
     }
     lastLayoutAt = now;
-    positionBottomBackdrop();
     const protectedRects = subtitleTextRects();
     const placed = [];
     const entries = [...labels.entries()]
@@ -609,7 +554,6 @@
   function scan() {
     addStyles();
     getLayer();
-    positionBottomBackdrop();
     maintainCaptionContinuity();
     const seen = new Set();
     const statuses = [];
@@ -711,10 +655,8 @@
     // Ignore our own label updates.
     for (const m of mutations) {
       const target = m.target.nodeType === 1 ? m.target : m.target.parentElement;
-      if (target?.closest?.('.' + BACKDROP_CLASS)) continue;
       if (!target?.closest?.('.' + LAYER_CLASS)) {
         maintainCaptionContinuity();
-        positionBottomBackdrop();
         scheduleScan();
         return;
       }
@@ -745,7 +687,6 @@
   document.addEventListener('playing', () => {
     captionHoldSuspended = false;
   }, true);
-  window.addEventListener('resize', positionBottomBackdrop, { passive: true });
 
   // LR sometimes replaces the subtitle DOM without a relevant mutation,
   // and empty dictionary results must eventually be retried.
