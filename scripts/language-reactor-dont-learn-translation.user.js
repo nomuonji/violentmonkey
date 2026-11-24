@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Language Reactor Don't Learn Translations
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      2.7.0
+// @version      2.8.0
 // @description  Always show dictionary meanings above purple (Don't Learn) words in Language Reactor subtitles.
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -52,7 +52,7 @@
   let lastLayoutAt = 0;
   const inspectedWords = new WeakMap();
   const diagnostics = {
-    version: '2.7.0', scannedPurple: 0, labels: 0, visible: 0,
+    version: '2.8.0', scannedPurple: 0, labels: 0, visible: 0,
     collisionHidden: 0, offscreenHidden: 0, emptyDictionary: 0, lookupErrors: 0,
     lastLayout: '', hiddenExamples: [], wordStatuses: [], extraLineSpacing: false,
     inlineFallbacks: 0, captionRows: 0
@@ -175,7 +175,21 @@
       }
       #lln-subs > .lln-subs-text {
         display: block !important;
-        width: 100% !important;
+        position: relative !important;
+        left: 50% !important;
+        transform: translateX(-50%) !important;
+        width: var(--lr-dl-caption-width, 100%) !important;
+        box-sizing: border-box !important;
+      }
+      #lln-translations {
+        margin-top: -6px !important;
+      }
+      #lln-translations .lln-whole-title-translation {
+        position: relative !important;
+        left: 50% !important;
+        transform: translateX(-50%) !important;
+        width: var(--lr-dl-caption-width, 100%) !important;
+        max-width: none !important;
         box-sizing: border-box !important;
       }
       /* A last-resort interlinear note reserves room in the English line box.
@@ -209,6 +223,18 @@
       if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
     }
     return true;
+  }
+
+  function updateCaptionBackgroundWidth() {
+    const subs = document.querySelector(SUBS_SELECTOR);
+    const playerArea = subs?.closest('.lln-subs-wrap') ||
+      document.querySelector('#lln-main-subs') ||
+      document.querySelector('#movie_player, .html5-video-player');
+    if (!playerArea) return;
+    const width = playerArea.getBoundingClientRect().width;
+    if (width > 0) {
+      document.documentElement.style.setProperty('--lr-dl-caption-width', width + 'px');
+    }
   }
 
   function maintainCaptionContinuity() {
@@ -554,6 +580,7 @@
   function scan() {
     addStyles();
     getLayer();
+    updateCaptionBackgroundWidth();
     maintainCaptionContinuity();
     const seen = new Set();
     const statuses = [];
@@ -687,6 +714,7 @@
   document.addEventListener('playing', () => {
     captionHoldSuspended = false;
   }, true);
+  window.addEventListener('resize', updateCaptionBackgroundWidth, { passive: true });
 
   // LR sometimes replaces the subtitle DOM without a relevant mutation,
   // and empty dictionary results must eventually be retried.
