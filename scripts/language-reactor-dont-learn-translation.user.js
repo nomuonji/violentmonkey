@@ -713,6 +713,8 @@
       const target = m.target.nodeType === 1 ? m.target : m.target.parentElement;
       if (target?.closest?.('.' + BACKDROP_CLASS)) continue;
       if (!target?.closest?.('.' + LAYER_CLASS)) {
+        maintainCaptionContinuity();
+        positionBottomBackdrop();
         scheduleScan();
         return;
       }
