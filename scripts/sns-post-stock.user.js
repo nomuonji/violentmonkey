@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SNS Post Stock (X / Threads)
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      1.2.1
+// @version      1.3.0
 // @description  One tap on 📌 saves X / Threads posts directly to a Notion database (text, author, metrics, media, links and tags).
 // @author       nomuonji
 // @match        https://x.com/*
@@ -30,12 +30,14 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.2.1';
+  const VERSION = '1.3.0';
 
   // ---- Settings / Notion API ---------------------------------------------
   const TOKEN_KEY = 'notionApiToken';
   const DATABASE_ID = 'a94abaa6-d2c8-4152-8c42-aa4f3c08c4f5';
   const DATA_SOURCE_ID = '5582b90f-2cb8-40f5-8656-a1c7fbc37b38';
+  const LEARNING_SOURCE_ID = '4234a56b-fb21-81c0-9617-000b908935f6';
+  const LEARNING_BTN_CLASS = 'sps-learning-btn';
   const NOTION_VERSION = '2026-03-11';
   const SAVED_KEY = 'savedKeys';
   const MAX_SAVED_KEYS = 5000;
@@ -122,6 +124,17 @@
       toast('Notion接続OK：' + (result.title?.[0]?.plain_text || 'SNS Post Archive'));
     } catch (error) {
       toast('Notion接続NG：' + error.message, 'error');
+    }
+  });
+
+  GM_registerMenuCommand('投稿ストック: 学習受け渡し接続テスト', async () => {
+    if (!getNotionToken() && !promptNotionToken()) return;
+    try {
+      const result = await notionRequest('GET', '/data_sources/' + LEARNING_SOURCE_ID);
+      if (result.id !== LEARNING_SOURCE_ID) throw new Error('受け渡しDBのIDが一致しません');
+      toast('学習受け渡し接続OK');
+    } catch (error) {
+      toast('学習受け渡し接続NG：' + error.message, 'error');
     }
   });
 
@@ -602,6 +615,11 @@
     .${BTN_CLASS}[data-state="saved"]{opacity:1;color:rgb(0,186,124)}
     .${BTN_CLASS}[data-state="busy"]{opacity:.4}
     .${BTN_CLASS} .sps-n{font-size:11px;margin-left:2px}
+    .${LEARNING_BTN_CLASS}{display:inline-flex;align-items:center;justify-content:center;
+      min-width:30px;height:34px;padding:0 5px;border:0;border-radius:999px;background:transparent;
+      color:inherit;cursor:pointer;font:600 13px/1 system-ui,sans-serif;opacity:.75;flex:0 0 auto}
+    .${LEARNING_BTN_CLASS}:hover{opacity:1;background:rgba(29,155,240,.12)}
+    .${LEARNING_BTN_CLASS}:disabled{opacity:.4;cursor:wait}
     #${PANEL_ID}{position:fixed;z-index:2147483646;width:min(300px,92vw);box-sizing:border-box;
       padding:8px;border-radius:10px;background:rgba(30,30,36,.97);color:#fff;
       box-shadow:0 4px 18px rgba(0,0,0,.45);font:500 13px/1.3 system-ui,sans-serif}
@@ -642,6 +660,7 @@
   // Add the button once per action row; refresh it if the site reused the row
   // for a different post (virtualised timelines).
   function placeButton(row, extract, key) {
+    placeLearningButton(row, extract, key);
     const existing = [...row.children].find(c => c.classList.contains(BTN_CLASS));
     if (existing) {
       existing._extract = extract;
@@ -653,6 +672,97 @@
       return;
     }
     row.appendChild(makeButton(extract, key));
+  }
+
+  // One-way handoff to the dedicated inbox. Never edit an already submitted
+  // page: the consumer may be acknowledging that immutable snapshot.
+  const learningInFlight = new Set();
+
+  function placeLearningButton(row, extract, key) {
+    let btn = [...row.children].find(c => c.classList.contains(LEARNING_BTN_CLASS));
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.className = LEARNING_BTN_CLASS;
+      btn.type = 'button';
+      btn.textContent = '学';
+      btn.title = 'AIに学ばせる（学習受け渡し）';
+      btn.setAttribute('aria-label', btn.title);
+      for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'touchstart', 'touchend']) {
+        btn.addEventListener(type, e => e.stopPropagation());
+      }
+      btn.addEventListener('click', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        void submitLearning(btn);
+      });
+      row.appendChild(btn);
+    }
+    btn._extract = extract;
+    if (btn.dataset.key !== key) {
+      btn.dataset.key = key;
+      btn.textContent = '学';
+      btn.disabled = false;
+    }
+  }
+
+  async function submitLearning(btn) {
+    if (!getNotionToken() && !promptNotionToken()) return;
+    let post;
+    try { post = btn._extract(); } catch (error) {
+      toast('投稿の読み取りに失敗しました', 'error'); return;
+    }
+    if (!post?.postId || !post?.url || !post?.text?.trim()) {
+      toast('本文を読み取れません。投稿詳細を開いて再試行してください', 'error');
+      return;
+    }
+    const key = post.platform + ':' + post.postId;
+    const buttonKey = btn.dataset.key;
+    if (learningInFlight.has(key)) return;
+    learningInFlight.add(key);
+    btn.disabled = true;
+    btn.textContent = '…';
+    const capturedAt = new Date().toISOString();
+    // Keep the full observed snapshot, including quoted text/media metadata.
+    // No credentials, page cookies or browser identity.
+    const payload = JSON.stringify({ ...post, capturedAt, scriptVersion: VERSION });
+    try {
+      const textParts = toNotionRichText(post.text);
+      const payloadParts = toNotionRichText(payload);
+      const joined = parts => parts.map(p => p.text.content).join('');
+      if (joined(textParts) !== post.text || joined(payloadParts) !== payload) {
+        throw new Error('投稿が長すぎます。省略せず保存できないため中止しました');
+      }
+      const matches = await notionRequest('POST', '/data_sources/' + LEARNING_SOURCE_ID + '/query', {
+        filter: { property: 'Post Key', rich_text: { equals: key } }, page_size: 100
+      });
+      const duplicate = (matches.results || []).find(p =>
+        readRichText(p.properties?.Text) === post.text &&
+        Boolean(p.properties?.Truncated?.checkbox) === Boolean(post.truncated));
+      if (!duplicate) {
+        const result = await notionRequest('POST', '/pages', {
+          parent: { type: 'data_source_id', data_source_id: LEARNING_SOURCE_ID },
+          properties: {
+            Name: { title: toNotionRichText(postTitle(post)) },
+            'Post Key': { rich_text: toNotionRichText(key) },
+            'Post URL': { url: post.url },
+            Text: { rich_text: textParts },
+            Author: { rich_text: toNotionRichText([post.author?.name, post.author?.handle].filter(Boolean).join(' ')) },
+            'Captured At': { date: { start: capturedAt } },
+            Truncated: { checkbox: Boolean(post.truncated) },
+            Payload: { rich_text: payloadParts }
+          }
+        });
+        if (!result?.id) throw new Error('受け渡しDBの保存IDがありません');
+      }
+      if (btn.dataset.key === buttonKey) btn.textContent = '済';
+      toast(duplicate ? '学習受け渡し済み' : 'AIの学習受け渡しに追加しました' + (post.truncated ? '（本文省略あり）' : ''));
+    } catch (error) {
+      if (btn.dataset.key === buttonKey) btn.textContent = '学';
+      toast('学習受け渡しに失敗：' + error.message, 'error');
+    } finally {
+      learningInFlight.delete(key);
+      if (btn.dataset.key === buttonKey) btn.disabled = false;
+    }
   }
 
   const HOVER_OPEN_MS = 350;
