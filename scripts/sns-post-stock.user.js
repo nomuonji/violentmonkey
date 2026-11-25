@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SNS Post Stock (X / Threads)
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      1.4.1
+// @version      1.4.2
 // @description  One tap on 📌 saves X / Threads posts directly to a Notion database (text, author, metrics, media, links and tags).
 // @author       nomuonji
 // @match        https://x.com/*
@@ -31,7 +31,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.4.1';
+  const VERSION = '1.4.2';
 
   // ---- Settings / Notion API ---------------------------------------------
   const TOKEN_KEY = 'notionApiToken';
@@ -425,6 +425,15 @@
     return time ? time.closest('a') : article.querySelector('a[href*="/status/"]');
   }
 
+  function xMore(article) {
+    const own = xOwnScope(article);
+    return [...article.querySelectorAll('[data-testid="tweet-text-show-more-link"]')].find(own);
+  }
+  function thMore(container) {
+    return [...container.querySelectorAll('button, [role="button"], a, span[role="button"]')].find(el =>
+      thContainerOf(el) === container &&
+      /^(see more|show more|read more|続きを読む|もっと見る|さらに表示|すべて表示|全文表示|もっと読む|もっと表示)$/i.test((el.textContent || '').trim()));
+  }
   function xExtract(article) {
     const own = xOwnScope(article);
     const link = [...article.querySelectorAll('a[href*="/status/"]')]
@@ -495,7 +504,7 @@
       media,
       links,
       quoted,
-      truncated: Boolean(article.querySelector('[data-testid="tweet-text-show-more-link"]')),
+      truncated: Boolean(xMore(article)),
       context: social ? social.textContent.trim() : '',
       isReply: /Replying to|返信先/.test(article.textContent.slice(0, 400))
     };
@@ -555,7 +564,7 @@
     const spans = [...container.querySelectorAll('span[dir="auto"]')].filter(span =>
       own(span) && !span.closest('a, [role="button"], button, time') &&
       !span.querySelector('span[dir="auto"]'));
-    const text = uniq(spans.map(s => richText(s))).join('\n').trim();
+    const text = spans.map(s => richText(s)).filter(Boolean).join('\n').trim();
 
     const metrics = {};
     thActionButtons(container).forEach(({ svg, btn }) => {
@@ -608,7 +617,7 @@
       media,
       links,
       quoted,
-      truncated: false,
+      truncated: Boolean(thMore(container)),
       rawText: (clone.innerText || clone.textContent || '').trim().slice(0, 5000)
     };
   }
@@ -789,6 +798,48 @@
     }
   }
 
+  function learningDetailMatches(post) {
+    const path = location.pathname.replace(/\/$/, '');
+    return path.endsWith((post.platform === 'x' ? '/status/' : '/post/') + post.postId);
+  }
+
+  async function fullLearningPost(initial, btn) {
+    const root = btn.closest(initial.platform === 'x' ? 'article[data-testid="tweet"]' : '[data-pressable-container="true"]');
+    const extract = initial.platform === 'x' ? xExtract : thExtract;
+    const selector = initial.platform === 'x' ? 'article[data-testid="tweet"]' : '[data-pressable-container="true"]';
+    const more = root && (initial.platform === 'x' ? xMore(root) : thMore(root));
+    // X exposes a truncation marker; Threads has heuristic text extraction,
+    // so require its individual post view before submission.
+    const needsExpansion = initial.truncated || (initial.platform === 'threads' && !learningDetailMatches(initial));
+    if (!needsExpansion) return initial;
+    toast('全文を取得しています');
+    if (more) more.click();
+    // A "show more" action can expand inline or navigate via the site's SPA.
+    // Wait for the exact original post, never a neighboring timeline item.
+    if (more) {
+      const deadline = Date.now() + 8000;
+      let stable = null;
+      while (Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 250));
+        for (const node of document.querySelectorAll(selector)) {
+          const p = extract(node);
+          if (!p || p.postId !== initial.postId || p.platform !== initial.platform || p.truncated) continue;
+          if (initial.platform === 'threads' && !learningDetailMatches(p)) continue;
+          if (initial.truncated && p.text.length <= initial.text.length) continue;
+          if (!p.text.trim() && !p.media?.length) continue;
+          if (stable && stable.text === p.text) return p;
+          stable = p;
+        }
+      }
+    }
+    // Never submit the partial snapshot. Open the exact source for a retry.
+    if (!learningDetailMatches(initial)) {
+      window.open(initial.url, '_blank', 'noopener,noreferrer');
+      throw Error('全文取得できませんでした。開いた投稿詳細で「学」を押してください');
+    }
+    throw Error('全文取得できませんでした。全文を表示してから「学」を押してください');
+  }
+
   async function submitLearning(btn) {
     if (!ensureLearningSettings()) return;
     let post;
@@ -806,12 +857,14 @@
     btn.disabled = true;
     btn.textContent = '…';
     try {
+      post = await fullLearningPost(post, btn);
+      if (post.truncated !== false) throw Error('本文が省略されているため送信を中止しました');
       const result = await learningRequest(post);
       if (!/^[0-9a-f]{64}$/.test(result?.id || '') || !['pending','received'].includes(result?.status)) {
         throw Error('My Portalの保存確認ができませんでした');
       }
       if (btn.dataset.key === buttonKey) btn.textContent = '済';
-      toast(result.status === 'received' ? 'AIの学習スペースに受領済み' : 'My Portalの学習受け渡しに追加しました' + (post.truncated ? '（本文省略あり）' : ''));
+      toast(result.status === 'received' ? 'AIの学習スペースに受領済み' : '全文をMy Portalの学習受け渡しに追加しました');
     } catch (error) {
       if (btn.dataset.key === buttonKey) btn.textContent = '学';
       toast('学習受け渡しに失敗：' + error.message, 'error');
