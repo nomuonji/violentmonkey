@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SNS Post Stock (X / Threads)
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      1.4.0
+// @version      1.4.1
 // @description  One tap on 📌 saves X / Threads posts directly to a Notion database (text, author, metrics, media, links and tags).
 // @author       nomuonji
 // @match        https://x.com/*
@@ -31,13 +31,13 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.4.0';
+  const VERSION = '1.4.1';
 
   // ---- Settings / Notion API ---------------------------------------------
   const TOKEN_KEY = 'notionApiToken';
   const DATABASE_ID = 'a94abaa6-d2c8-4152-8c42-aa4f3c08c4f5';
   const DATA_SOURCE_ID = '5582b90f-2cb8-40f5-8656-a1c7fbc37b38';
-  const LEARNING_ENDPOINT = 'https://my-portal-agent.netlify.app/api/agent-ideas/learning-inbox';
+  const LEARNING_ENDPOINT_KEY = 'myPortalLearningEndpoint';
   const LEARNING_TOKEN_KEY = 'myPortalLearningSendKey';
   const LEARNING_BTN_CLASS = 'sps-learning-btn';
   const NOTION_VERSION = '2026-03-11';
@@ -129,6 +129,34 @@
     }
   });
 
+  function getLearningEndpoint() {
+    return String(GM_getValue(LEARNING_ENDPOINT_KEY, '') || '').trim();
+  }
+  function normalizeLearningEndpoint(value) {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || url.username || url.password || url.hash) {
+      throw Error('HTTPSのURLを指定してください（認証情報・フラグメント不可）');
+    }
+    return url.href;
+  }
+  function promptLearningEndpoint() {
+    const value = window.prompt('学習受け渡しのエンドポイントURL（HTTPS）を入力してください', getLearningEndpoint());
+    if (value === null) return false;
+    try {
+      const endpoint = normalizeLearningEndpoint(value.trim());
+      const previous = getLearningEndpoint();
+      // Never forward a previously configured credential to a changed destination.
+      if (previous && previous !== endpoint) {
+        GM_setValue(LEARNING_TOKEN_KEY, '');
+      }
+      GM_setValue(LEARNING_ENDPOINT_KEY, endpoint);
+      toast('学習受け渡しURLを設定しました' + (previous && previous !== endpoint ? '。送信キーを再設定してください' : ''));
+      return true;
+    } catch (error) {
+      toast('有効なHTTPSエンドポイントを入力してください', 'error');
+      return false;
+    }
+  }
   function getLearningKey() {
     return String(GM_getValue(LEARNING_TOKEN_KEY, '') || '').trim();
   }
@@ -145,10 +173,15 @@
     return true;
   }
   function learningRequest(payload) {
+    const endpoint = getLearningEndpoint();
+    const key = getLearningKey();
+    if (!endpoint || !key) return Promise.reject(Error('学習受け渡しURLと送信キーを設定してください'));
+    let url;
+    try { url = normalizeLearningEndpoint(endpoint); } catch (error) { return Promise.reject(error); }
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
-        method: 'POST', url: LEARNING_ENDPOINT, anonymous: true, timeout: 25000,
-        headers: {Authorization: 'Bearer ' + getLearningKey(), 'Content-Type': 'application/json'},
+        method: 'POST', url, anonymous: true, timeout: 25000,
+        headers: {Authorization: 'Bearer ' + key, 'Content-Type': 'application/json'},
         data: JSON.stringify(payload),
         onload: res => {
           let body;
@@ -164,13 +197,24 @@
       });
     });
   }
+  function ensureLearningSettings() {
+    if (!getLearningEndpoint() && !promptLearningEndpoint()) return false;
+    if (!getLearningKey() && !promptLearningKey()) return false;
+    return true;
+  }
+  GM_registerMenuCommand('投稿ストック: 学習受け渡しURLを設定', promptLearningEndpoint);
+  GM_registerMenuCommand('投稿ストック: 学習受け渡しURLを削除', () => {
+    GM_setValue(LEARNING_ENDPOINT_KEY, '');
+    GM_setValue(LEARNING_TOKEN_KEY, '');
+    toast('学習受け渡しURLと送信キーを削除しました');
+  });
   GM_registerMenuCommand('投稿ストック: 学習送信キーを設定', promptLearningKey);
   GM_registerMenuCommand('投稿ストック: 学習送信キーを削除', () => {
     GM_setValue(LEARNING_TOKEN_KEY, '');
     toast('学習送信キーを削除しました');
   });
   GM_registerMenuCommand('投稿ストック: 学習受け渡し接続テスト', async () => {
-    if (!getLearningKey() && !promptLearningKey()) return;
+    if (!ensureLearningSettings()) return;
     try {
       const result = await learningRequest({ping:true});
       if (result.ok !== true || result.scope !== 'learning-inbox-submit') throw Error('応答を確認できません');
@@ -746,7 +790,7 @@
   }
 
   async function submitLearning(btn) {
-    if (!getLearningKey() && !promptLearningKey()) return;
+    if (!ensureLearningSettings()) return;
     let post;
     try { post = btn._extract(); } catch (error) {
       toast('投稿の読み取りに失敗しました', 'error'); return;
