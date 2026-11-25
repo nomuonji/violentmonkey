@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SNS Post Stock (X / Threads)
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      1.3.0
+// @version      1.4.0
 // @description  One tap on 📌 saves X / Threads posts directly to a Notion database (text, author, metrics, media, links and tags).
 // @author       nomuonji
 // @match        https://x.com/*
@@ -17,6 +17,7 @@
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @connect      api.notion.com
+// @connect      my-portal-agent.netlify.app
 // @noframes
 // @updateURL    https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/sns-post-stock.user.js
 // @downloadURL  https://raw.githubusercontent.com/nomuonji/violentmonkey/main/scripts/sns-post-stock.user.js
@@ -30,13 +31,14 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.3.0';
+  const VERSION = '1.4.0';
 
   // ---- Settings / Notion API ---------------------------------------------
   const TOKEN_KEY = 'notionApiToken';
   const DATABASE_ID = 'a94abaa6-d2c8-4152-8c42-aa4f3c08c4f5';
   const DATA_SOURCE_ID = '5582b90f-2cb8-40f5-8656-a1c7fbc37b38';
-  const LEARNING_SOURCE_ID = '4234a56b-fb21-81c0-9617-000b908935f6';
+  const LEARNING_ENDPOINT = 'https://my-portal-agent.netlify.app/api/agent-ideas/learning-inbox';
+  const LEARNING_TOKEN_KEY = 'myPortalLearningSendKey';
   const LEARNING_BTN_CLASS = 'sps-learning-btn';
   const NOTION_VERSION = '2026-03-11';
   const SAVED_KEY = 'savedKeys';
@@ -127,15 +129,53 @@
     }
   });
 
-  GM_registerMenuCommand('投稿ストック: 学習受け渡し接続テスト', async () => {
-    if (!getNotionToken() && !promptNotionToken()) return;
-    try {
-      const result = await notionRequest('GET', '/data_sources/' + LEARNING_SOURCE_ID);
-      if (result.id !== LEARNING_SOURCE_ID) throw new Error('受け渡しDBのIDが一致しません');
-      toast('学習受け渡し接続OK');
-    } catch (error) {
-      toast('学習受け渡し接続NG：' + error.message, 'error');
+  function getLearningKey() {
+    return String(GM_getValue(LEARNING_TOKEN_KEY, '') || '').trim();
+  }
+  function promptLearningKey() {
+    const value = window.prompt('My Portal の学習送信キーを入力してください', getLearningKey());
+    if (value === null) return false;
+    const key = value.trim();
+    if (!/^learn-[A-Za-z0-9-]{12,80}$/.test(key)) {
+      toast('学習送信キーの形式を確認してください', 'error');
+      return false;
     }
+    GM_setValue(LEARNING_TOKEN_KEY, key);
+    toast('学習送信キーを設定しました');
+    return true;
+  }
+  function learningRequest(payload) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: 'POST', url: LEARNING_ENDPOINT, anonymous: true, timeout: 25000,
+        headers: {Authorization: 'Bearer ' + getLearningKey(), 'Content-Type': 'application/json'},
+        data: JSON.stringify(payload),
+        onload: res => {
+          let body;
+          try { body = JSON.parse(res.responseText); } catch { reject(Error('My Portalから有効な応答がありません')); return; }
+          if (res.status < 200 || res.status >= 300) {
+            reject(Error(res.status === 401 ? '学習送信キーを確認してください' : (body.error || 'HTTP ' + res.status)));
+            return;
+          }
+          resolve(body);
+        },
+        onerror: () => reject(Error('My Portalへの通信に失敗しました')),
+        ontimeout: () => reject(Error('My Portalへの通信がタイムアウトしました'))
+      });
+    });
+  }
+  GM_registerMenuCommand('投稿ストック: 学習送信キーを設定', promptLearningKey);
+  GM_registerMenuCommand('投稿ストック: 学習送信キーを削除', () => {
+    GM_setValue(LEARNING_TOKEN_KEY, '');
+    toast('学習送信キーを削除しました');
+  });
+  GM_registerMenuCommand('投稿ストック: 学習受け渡し接続テスト', async () => {
+    if (!getLearningKey() && !promptLearningKey()) return;
+    try {
+      const result = await learningRequest({ping:true});
+      if (result.ok !== true || result.scope !== 'learning-inbox-submit') throw Error('応答を確認できません');
+      toast('My Portal 学習受け渡し接続OK');
+    } catch (error) { toast('学習受け渡し接続NG：' + error.message, 'error'); }
   });
 
   // ---- Notion data helpers ------------------------------------------------
@@ -706,13 +746,13 @@
   }
 
   async function submitLearning(btn) {
-    if (!getNotionToken() && !promptNotionToken()) return;
+    if (!getLearningKey() && !promptLearningKey()) return;
     let post;
     try { post = btn._extract(); } catch (error) {
       toast('投稿の読み取りに失敗しました', 'error'); return;
     }
-    if (!post?.postId || !post?.url || !post?.text?.trim()) {
-      toast('本文を読み取れません。投稿詳細を開いて再試行してください', 'error');
+    if (!post?.postId || !post?.url || (!post?.text?.trim() && !post?.media?.length)) {
+      toast('投稿を読み取れません。投稿詳細を開いて再試行してください', 'error');
       return;
     }
     const key = post.platform + ':' + post.postId;
@@ -721,41 +761,13 @@
     learningInFlight.add(key);
     btn.disabled = true;
     btn.textContent = '…';
-    const capturedAt = new Date().toISOString();
-    // Keep the full observed snapshot, including quoted text/media metadata.
-    // No credentials, page cookies or browser identity.
-    const payload = JSON.stringify({ ...post, capturedAt, scriptVersion: VERSION });
     try {
-      const textParts = toNotionRichText(post.text);
-      const payloadParts = toNotionRichText(payload);
-      const joined = parts => parts.map(p => p.text.content).join('');
-      if (joined(textParts) !== post.text || joined(payloadParts) !== payload) {
-        throw new Error('投稿が長すぎます。省略せず保存できないため中止しました');
-      }
-      const matches = await notionRequest('POST', '/data_sources/' + LEARNING_SOURCE_ID + '/query', {
-        filter: { property: 'Post Key', rich_text: { equals: key } }, page_size: 100
-      });
-      const duplicate = (matches.results || []).find(p =>
-        readRichText(p.properties?.Text) === post.text &&
-        Boolean(p.properties?.Truncated?.checkbox) === Boolean(post.truncated));
-      if (!duplicate) {
-        const result = await notionRequest('POST', '/pages', {
-          parent: { type: 'data_source_id', data_source_id: LEARNING_SOURCE_ID },
-          properties: {
-            Name: { title: toNotionRichText(postTitle(post)) },
-            'Post Key': { rich_text: toNotionRichText(key) },
-            'Post URL': { url: post.url },
-            Text: { rich_text: textParts },
-            Author: { rich_text: toNotionRichText([post.author?.name, post.author?.handle].filter(Boolean).join(' ')) },
-            'Captured At': { date: { start: capturedAt } },
-            Truncated: { checkbox: Boolean(post.truncated) },
-            Payload: { rich_text: payloadParts }
-          }
-        });
-        if (!result?.id) throw new Error('受け渡しDBの保存IDがありません');
+      const result = await learningRequest(post);
+      if (!/^[0-9a-f]{64}$/.test(result?.id || '') || !['pending','received'].includes(result?.status)) {
+        throw Error('My Portalの保存確認ができませんでした');
       }
       if (btn.dataset.key === buttonKey) btn.textContent = '済';
-      toast(duplicate ? '学習受け渡し済み' : 'AIの学習受け渡しに追加しました' + (post.truncated ? '（本文省略あり）' : ''));
+      toast(result.status === 'received' ? 'AIの学習スペースに受領済み' : 'My Portalの学習受け渡しに追加しました' + (post.truncated ? '（本文省略あり）' : ''));
     } catch (error) {
       if (btn.dataset.key === buttonKey) btn.textContent = '学';
       toast('学習受け渡しに失敗：' + error.message, 'error');
