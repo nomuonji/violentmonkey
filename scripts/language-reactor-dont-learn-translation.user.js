@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Language Reactor Don't Learn Translations
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      3.6.0
+// @version      3.7.0
 // @description  Always show dictionary meanings above purple (Don't Learn) words in Language Reactor subtitles.
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -41,8 +41,10 @@
   const INLINE_CLASS = 'lr-dl-inline-gloss';
   const CAPTION_OVERLAY_CLASS = 'lr-dl-caption-overlay';
   const CAPTION_SOURCE_CLASS = 'lr-dl-caption-source-hidden';
+  const CAPTION_BACKDROP_CLASS = 'lr-dl-caption-backdrop';
   const captionSnapshots = new Map();
   const captionOverlays = new Map();
+  let captionBackdrop = null;
   let captionHoldSuspended = false;
 
   const RETRY_MS = 30000;
@@ -55,7 +57,7 @@
   let lastLayoutAt = 0;
   const inspectedWords = new WeakMap();
   const diagnostics = {
-    version: '3.6.0', scannedPurple: 0, labels: 0, visible: 0,
+    version: '3.7.0', scannedPurple: 0, labels: 0, visible: 0,
     collisionHidden: 0, offscreenHidden: 0, emptyDictionary: 0, lookupErrors: 0,
     lastLayout: '', hiddenExamples: [], wordStatuses: [], extraLineSpacing: false,
     inlineFallbacks: 0, captionRows: 0
@@ -185,6 +187,10 @@
       .${CAPTION_SOURCE_CLASS} {
         visibility: hidden !important;
       }
+      .${CAPTION_BACKDROP_CLASS} {
+        position: fixed; pointer-events: none; z-index: 0;
+        background: rgba(0, 0, 0, 0.85); border-radius: 4px;
+      }
       #lln-subs > .lln-subs-text {
         display: block !important;
         position: relative !important;
@@ -294,6 +300,61 @@
     return true;
   }
 
+  function clearIndividualCaptionBackground(element) {
+    element.style.setProperty('background-color', 'transparent', 'important');
+    element.style.setProperty('background-image', 'none', 'important');
+    element.style.setProperty('border-color', 'transparent', 'important');
+    element.style.setProperty('box-shadow', 'none', 'important');
+  }
+
+  function findCaptionBackground(host) {
+    const candidates = [
+      ...host.querySelectorAll('.lln-subs-text, .lln-whole-title-translation'),
+      host
+    ];
+    for (const candidate of candidates) {
+      let node = candidate;
+      let depth = 0;
+      while (node && depth++ < 5) {
+        const style = getComputedStyle(node);
+        const color = style.backgroundColor;
+        if (color && color !== 'transparent' && color !== 'rgba(0, 0, 0, 0)') {
+          return { color, opacity: Number(style.opacity) || 1 };
+        }
+        if (node === host) break;
+        node = node.parentElement;
+      }
+    }
+    return { color: 'rgba(0, 0, 0, 0.85)', opacity: 1 };
+  }
+
+  function updateCaptionBackdrop() {
+    const items = [...captionOverlays.values()].filter(item => item.box);
+    if (!items.length) {
+      captionBackdrop?.remove();
+      captionBackdrop = null;
+      return;
+    }
+    if (!captionBackdrop?.isConnected) {
+      captionBackdrop = document.createElement('div');
+      captionBackdrop.className = CAPTION_BACKDROP_CLASS;
+      getCaptionOverlay().prepend(captionBackdrop);
+    }
+    const left = Math.min(...items.map(item => item.box.left));
+    const top = Math.min(...items.map(item => item.box.top));
+    const right = Math.max(...items.map(item => item.box.left + item.box.width));
+    const bottom = Math.max(...items.map(item => item.box.top + item.box.height));
+    const width = right - left;
+    const height = bottom - top;
+    const background = items.find(item => item.background)?.background || {};
+    captionBackdrop.style.left = left + 'px';
+    captionBackdrop.style.top = top + 'px';
+    captionBackdrop.style.width = width + 'px';
+    captionBackdrop.style.height = height + 'px';
+    captionBackdrop.style.backgroundColor = background.color || 'rgba(0, 0, 0, 0.85)';
+    captionBackdrop.style.opacity = String(background.opacity || 1);
+  }
+
   function copyCaptionToOverlay(selector, host, html) {
     const previous = captionOverlays.get(selector);
     const clone = host.cloneNode(true);
@@ -320,6 +381,7 @@
       cloneLines[i].style.setProperty('visibility', 'visible', 'important');
       cloneLines[i].style.setProperty('animation', 'none', 'important');
       cloneLines[i].style.setProperty('transition', 'none', 'important');
+      clearIndividualCaptionBackground(cloneLines[i]);
     }
 
     const sourceWords = host.querySelectorAll(WORD_SELECTOR);
@@ -331,9 +393,14 @@
     const cloneTranslations = clone.querySelectorAll('.lln-whole-title-translation');
     for (let i = 0; i < Math.min(sourceTranslations.length, cloneTranslations.length); i++) {
       copyStyleProperties(sourceTranslations[i], cloneTranslations[i], ROOT_STYLE_PROPS);
+      clearIndividualCaptionBackground(cloneTranslations[i]);
     }
+    clearIndividualCaptionBackground(clone);
 
-    const item = { clone, html, host, box: previous?.box };
+    const item = {
+      clone, html, host, box: previous?.box,
+      background: findCaptionBackground(host)
+    };
     if (!positionCaptionClone(item, host)) return;
     getCaptionOverlay().appendChild(clone);
     previous?.clone.remove();
@@ -363,6 +430,7 @@
         host.classList.add(CAPTION_SOURCE_CLASS);
       }
     }
+    updateCaptionBackdrop();
   }
 
   function clearCaptionSnapshots() {
@@ -371,6 +439,7 @@
     for (const item of captionOverlays.values()) item.clone.remove();
     captionOverlays.clear();
     document.querySelector('.' + CAPTION_OVERLAY_CLASS)?.remove();
+    captionBackdrop = null;
     captionSnapshots.clear();
   }
 
