@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Language Reactor Don't Learn Translations
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      3.11.0
+// @version      3.12.0
 // @description  Always show dictionary meanings above purple (Don't Learn) words in Language Reactor subtitles.
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -39,7 +39,6 @@
   const LABEL_CLASS = 'lr-dl-label';
   const STYLE_ID = 'lr-dl-style';
   const INLINE_CLASS = 'lr-dl-inline-gloss';
-  const CAPTION_PIN_CLASS = 'lr-dl-caption-pinned';
   const captionSnapshots = new Map();
   let captionHoldSuspended = false;
 
@@ -53,7 +52,7 @@
   let lastLayoutAt = 0;
   const inspectedWords = new WeakMap();
   const diagnostics = {
-    version: '3.11.0', scannedPurple: 0, labels: 0, visible: 0,
+    version: '3.12.0', scannedPurple: 0, labels: 0, visible: 0,
     collisionHidden: 0, offscreenHidden: 0, emptyDictionary: 0, lookupErrors: 0,
     lastLayout: '', hiddenExamples: [], wordStatuses: [], extraLineSpacing: false,
     inlineFallbacks: 0, captionRows: 0
@@ -174,12 +173,6 @@
       #lln-subs {
         width: 100% !important;
       }
-      #lln-main-subs.${CAPTION_PIN_CLASS},
-      #lln-subs.${CAPTION_PIN_CLASS},
-      #lln-translations.${CAPTION_PIN_CLASS} {
-        visibility: visible !important;
-        opacity: 1 !important;
-      }
       #lln-subs > .lln-subs-text {
         display: block !important;
         position: relative !important;
@@ -246,28 +239,18 @@
     if (captionHoldSuspended) return;
     for (const selector of ['#lln-subs', '#lln-translations']) {
       const host = document.querySelector(selector);
-      if (!host) continue;
+      if (!host || !captionHostVisible(host)) continue;
       const content = selector === '#lln-subs'
         ? (host.querySelector('.lln-subs-text') || host)
         : host;
       const html = content.innerHTML;
       if (content.textContent.trim()) {
         captionSnapshots.set(selector, html);
-      } else {
-        const previous = captionSnapshots.get(selector);
-        if (previous) content.innerHTML = previous;
+        continue;
       }
-      if (captionSnapshots.has(selector)) {
-        host.classList.add(CAPTION_PIN_CLASS);
-        document.querySelector('#lln-main-subs')?.classList.add(CAPTION_PIN_CLASS);
-      }
+      const previous = captionSnapshots.get(selector);
+      if (previous) content.innerHTML = previous;
     }
-  }
-
-  function clearCaptionContinuity() {
-    captionSnapshots.clear();
-    document.querySelectorAll('.' + CAPTION_PIN_CLASS)
-      .forEach(node => node.classList.remove(CAPTION_PIN_CLASS));
   }
 
   // Screen-space coordinates and CSS placement must share one coordinate system.
@@ -712,7 +695,7 @@
   });
   document.addEventListener('seeking', () => {
     captionHoldSuspended = true;
-    clearCaptionContinuity();
+    captionSnapshots.clear();
   }, true);
   document.addEventListener('seeked', () => {
     captionHoldSuspended = false;
@@ -720,11 +703,11 @@
   }, true);
   document.addEventListener('ended', () => {
     captionHoldSuspended = true;
-    clearCaptionContinuity();
+    captionSnapshots.clear();
   }, true);
   document.addEventListener('emptied', () => {
     captionHoldSuspended = true;
-    clearCaptionContinuity();
+    captionSnapshots.clear();
   }, true);
   document.addEventListener('playing', () => {
     captionHoldSuspended = false;
