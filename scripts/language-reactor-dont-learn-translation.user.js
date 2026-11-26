@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Language Reactor Don't Learn Translations
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      3.13.0
+// @version      3.14.0
 // @description  Always show dictionary meanings above purple (Don't Learn) words in Language Reactor subtitles.
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -58,7 +58,7 @@
   let lastLayoutAt = 0;
   const inspectedWords = new WeakMap();
   const diagnostics = {
-    version: '3.13.0', scannedPurple: 0, labels: 0, visible: 0,
+    version: '3.14.0', scannedPurple: 0, labels: 0, visible: 0,
     collisionHidden: 0, offscreenHidden: 0, emptyDictionary: 0, lookupErrors: 0,
     lastLayout: '', hiddenExamples: [], wordStatuses: [], extraLineSpacing: false,
     inlineFallbacks: 0, captionRows: 0
@@ -283,9 +283,7 @@
     }
     if (!captionSnapshot || heldCaptionNode?.isConnected || holdTimer || holdInsertions >= 40) return;
 
-    // Delay and cap writes so a page re-render cannot form a mutation loop.
-    holdTimer = setTimeout(() => {
-      holdTimer = 0;
+    const insertHeldCaption = () => {
       const current = document.querySelector('#lln-subs-content');
       if (captionHoldSuspended || !current || !captionHostVisible(current) ||
           current.querySelector('.lln-subs-wrap:not(.lr-dl-held-caption)') ||
@@ -298,7 +296,18 @@
       heldCaptionNode = held;
       holdInsertions++;
       lastHoldInsertionAt = Date.now();
-    }, Math.max(80, 250 - (Date.now() - lastHoldInsertionAt)));
+    };
+    // The first insertion runs within the removal observer, before the next paint.
+    // Only repeated removals are throttled to avoid a mutation feedback loop.
+    const retryDelay = holdInsertions ? 250 - (Date.now() - lastHoldInsertionAt) : 0;
+    if (retryDelay <= 0) {
+      insertHeldCaption();
+    } else {
+      holdTimer = setTimeout(() => {
+        holdTimer = 0;
+        insertHeldCaption();
+      }, retryDelay);
+    }
   }
 
   // Screen-space coordinates and CSS placement must share one coordinate system.
