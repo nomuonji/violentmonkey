@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Language Reactor Don't Learn Translations
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      3.0.0
+// @version      3.1.0
 // @description  Always show dictionary meanings above purple (Don't Learn) words in Language Reactor subtitles.
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -39,6 +39,7 @@
   const LABEL_CLASS = 'lr-dl-label';
   const STYLE_ID = 'lr-dl-style';
   const INLINE_CLASS = 'lr-dl-inline-gloss';
+  const CAPTION_HOLD_CLASS = 'lr-dl-caption-held';
   const captionSnapshots = new Map();
   let captionHoldSuspended = false;
 
@@ -52,7 +53,7 @@
   let lastLayoutAt = 0;
   const inspectedWords = new WeakMap();
   const diagnostics = {
-    version: '3.0.0', scannedPurple: 0, labels: 0, visible: 0,
+    version: '3.1.0', scannedPurple: 0, labels: 0, visible: 0,
     collisionHidden: 0, offscreenHidden: 0, emptyDictionary: 0, lookupErrors: 0,
     lastLayout: '', hiddenExamples: [], wordStatuses: [], extraLineSpacing: false,
     inlineFallbacks: 0, captionRows: 0
@@ -173,6 +174,14 @@
       #lln-subs {
         width: 100% !important;
       }
+      /* Keep the last rendered caption visible while LR briefly hides its
+         subtitle hosts between cues. The hold class is removed on new text. */
+      #lln-subs.lr-dl-caption-held,
+      #lln-translations.lr-dl-caption-held {
+        display: block !important;
+        visibility: visible !important;
+        opacity: 1 !important;
+      }
       #lln-subs > .lln-subs-text {
         display: block !important;
         position: relative !important;
@@ -239,18 +248,41 @@
     if (captionHoldSuspended) return;
     for (const selector of ['#lln-subs', '#lln-translations']) {
       const host = document.querySelector(selector);
-      if (!host || !captionHostVisible(host)) continue;
+      if (!host) continue;
       const content = selector === '#lln-subs'
         ? (host.querySelector('.lln-subs-text') || host)
         : host;
       const html = content.innerHTML;
-      if (content.textContent.trim()) {
-        captionSnapshots.set(selector, html);
+      const text = content.textContent.trim();
+      const previous = captionSnapshots.get(selector);
+      const held = host.classList.contains(CAPTION_HOLD_CLASS);
+
+      if (text) {
+        // A changed caption is the hand-off point: replace the held caption
+        // and release the host so LR can resume its own timing/visibility.
+        if (!previous || html !== previous) {
+          captionSnapshots.set(selector, html);
+          host.classList.remove(CAPTION_HOLD_CLASS);
+          continue;
+        }
+        // Do not undo our own hold on the observer pass caused by its class.
+        if (held) continue;
+        if (!captionHostVisible(host)) host.classList.add(CAPTION_HOLD_CLASS);
         continue;
       }
-      const previous = captionSnapshots.get(selector);
-      if (previous) content.innerHTML = previous;
+
+      if (previous) {
+        if (!held && !captionHostVisible(host)) host.classList.add(CAPTION_HOLD_CLASS);
+        content.innerHTML = previous;
+      }
     }
+  }
+
+  function clearCaptionSnapshots() {
+    for (const selector of ['#lln-subs', '#lln-translations']) {
+      document.querySelector(selector)?.classList.remove(CAPTION_HOLD_CLASS);
+    }
+    captionSnapshots.clear();
   }
 
   // Screen-space coordinates and CSS placement must share one coordinate system.
@@ -695,7 +727,7 @@
   });
   document.addEventListener('seeking', () => {
     captionHoldSuspended = true;
-    captionSnapshots.clear();
+    clearCaptionSnapshots();
   }, true);
   document.addEventListener('seeked', () => {
     captionHoldSuspended = false;
@@ -703,11 +735,11 @@
   }, true);
   document.addEventListener('ended', () => {
     captionHoldSuspended = true;
-    captionSnapshots.clear();
+    clearCaptionSnapshots();
   }, true);
   document.addEventListener('emptied', () => {
     captionHoldSuspended = true;
-    captionSnapshots.clear();
+    clearCaptionSnapshots();
   }, true);
   document.addEventListener('playing', () => {
     captionHoldSuspended = false;
