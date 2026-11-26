@@ -252,13 +252,21 @@
       node = node.parentElement;
     }
     node ||= host;
+    const previous = heldCaptionHosts.get(selector);
+    if (previous && previous !== node &&
+        ![...heldCaptionHosts].some(([key, held]) => key !== selector && held === previous)) {
+      previous.classList.remove(CAPTION_HOLD_CLASS);
+    }
     node.classList.add(CAPTION_HOLD_CLASS);
     heldCaptionHosts.set(selector, node);
   }
 
   function releaseCaptionHold(selector) {
-    heldCaptionHosts.get(selector)?.classList.remove(CAPTION_HOLD_CLASS);
+    const node = heldCaptionHosts.get(selector);
     heldCaptionHosts.delete(selector);
+    if (node && ![...heldCaptionHosts.values()].includes(node)) {
+      node.classList.remove(CAPTION_HOLD_CLASS);
+    }
   }
 
   function maintainCaptionContinuity() {
