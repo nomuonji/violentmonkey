@@ -311,12 +311,10 @@
     for (let i = 0; i < Math.min(sourceWords.length, cloneWords.length); i++) {
       copyStyleProperties(sourceWords[i], cloneWords[i], WORD_STYLE_PROPS);
     }
-    for (const source of host.querySelectorAll('.lln-whole-title-translation')) {
-      const target = clone.querySelector('#' + CSS.escape(source.id)) ||
-        [...clone.querySelectorAll('.lln-whole-title-translation')][
-          [...host.querySelectorAll('.lln-whole-title-translation')].indexOf(source)
-        ];
-      if (target) copyStyleProperties(source, target, ROOT_STYLE_PROPS);
+    const sourceTranslations = host.querySelectorAll('.lln-whole-title-translation');
+    const cloneTranslations = clone.querySelectorAll('.lln-whole-title-translation');
+    for (let i = 0; i < Math.min(sourceTranslations.length, cloneTranslations.length); i++) {
+      copyStyleProperties(sourceTranslations[i], cloneTranslations[i], ROOT_STYLE_PROPS);
     }
 
     const item = { clone, html, host, box: previous?.box };
