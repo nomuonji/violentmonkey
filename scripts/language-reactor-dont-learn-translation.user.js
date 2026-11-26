@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Language Reactor Don't Learn Translations
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      3.1.0
+// @version      3.2.0
 // @description  Always show dictionary meanings above purple (Don't Learn) words in Language Reactor subtitles.
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -54,7 +54,7 @@
   let lastLayoutAt = 0;
   const inspectedWords = new WeakMap();
   const diagnostics = {
-    version: '3.1.0', scannedPurple: 0, labels: 0, visible: 0,
+    version: '3.2.0', scannedPurple: 0, labels: 0, visible: 0,
     collisionHidden: 0, offscreenHidden: 0, emptyDictionary: 0, lookupErrors: 0,
     lastLayout: '', hiddenExamples: [], wordStatuses: [], extraLineSpacing: false,
     inlineFallbacks: 0, captionRows: 0
@@ -251,7 +251,7 @@
       if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') break;
       node = node.parentElement;
     }
-    node ||= host;
+    if (!node || node === document.documentElement) node = host;
     const previous = heldCaptionHosts.get(selector);
     if (previous && previous !== node &&
         ![...heldCaptionHosts].some(([key, held]) => key !== selector && held === previous)) {
@@ -283,21 +283,17 @@
       const held = heldCaptionHosts.has(selector);
 
       if (text) {
-        // A changed caption is the hand-off point: replace the held caption
-        // and release the host so LR can resume its own timing/visibility.
-        if (!previous || html !== previous) {
-          captionSnapshots.set(selector, html);
-          releaseCaptionHold(selector);
-          continue;
-        }
-        // Do not undo our own hold on the observer pass caused by its class.
-        if (held) continue;
-        if (!captionHostVisible(host)) setCaptionHold(selector, host);
+        // Pin every rendered cue immediately. Waiting until LR's opacity fade
+        // reaches zero leaves a visible blank interval before the next scan.
+        if (!previous || html !== previous) captionSnapshots.set(selector, html);
+        if (!held) setCaptionHold(selector, host);
         continue;
       }
 
+      // LR can clear or fade its subtitle host between cues. Restore the last
+      // captured caption and keep its host pinned until new text replaces it.
       if (previous) {
-        if (!held && !captionHostVisible(host)) setCaptionHold(selector, host);
+        if (!held) setCaptionHold(selector, host);
         content.innerHTML = previous;
       }
     }
