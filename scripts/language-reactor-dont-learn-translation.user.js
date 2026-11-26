@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Language Reactor Don't Learn Translations
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      3.3.0
+// @version      3.4.0
 // @description  Always show dictionary meanings above purple (Don't Learn) words in Language Reactor subtitles.
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -39,10 +39,9 @@
   const LABEL_CLASS = 'lr-dl-label';
   const STYLE_ID = 'lr-dl-style';
   const INLINE_CLASS = 'lr-dl-inline-gloss';
-  const CAPTION_OVERLAY_CLASS = 'lr-dl-caption-overlay';
-  const CAPTION_SOURCE_CLASS = 'lr-dl-caption-source-hidden';
+  const CAPTION_HOLD_CLASS = 'lr-dl-caption-held';
   const captionSnapshots = new Map();
-  const captionOverlays = new Map();
+  const heldCaptionHosts = new Map();
   let captionHoldSuspended = false;
 
   const RETRY_MS = 30000;
@@ -55,7 +54,7 @@
   let lastLayoutAt = 0;
   const inspectedWords = new WeakMap();
   const diagnostics = {
-    version: '3.3.0', scannedPurple: 0, labels: 0, visible: 0,
+    version: '3.4.0', scannedPurple: 0, labels: 0, visible: 0,
     collisionHidden: 0, offscreenHidden: 0, emptyDictionary: 0, lookupErrors: 0,
     lastLayout: '', hiddenExamples: [], wordStatuses: [], extraLineSpacing: false,
     inlineFallbacks: 0, captionRows: 0
@@ -178,12 +177,10 @@
       }
       /* Keep the last rendered caption visible while LR briefly hides its
          subtitle hosts between cues. The hold class is removed on new text. */
-      .${CAPTION_OVERLAY_CLASS} {
-        position: fixed; inset: 0; pointer-events: none;
-        z-index: 2147482999;
-      }
-      .${CAPTION_SOURCE_CLASS} {
-        visibility: hidden !important;
+      .lr-dl-caption-held {
+        display: block !important;
+        visibility: visible !important;
+        opacity: 1 !important;
       }
       #lln-subs > .lln-subs-text {
         display: block !important;
@@ -247,63 +244,29 @@
     }
   }
 
-  function getCaptionOverlay() {
-    const parent = document.fullscreenElement || document.documentElement;
-    let layer = document.querySelector('.' + CAPTION_OVERLAY_CLASS);
-    if (!layer) {
-      layer = document.createElement('div');
-      layer.className = CAPTION_OVERLAY_CLASS;
+  function setCaptionHold(selector, host) {
+    let node = host;
+    while (node && node !== document.documentElement) {
+      const style = getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') break;
+      node = node.parentElement;
     }
-    if (layer.parentElement !== parent) parent.appendChild(layer);
-    return layer;
+    if (!node || node === document.documentElement) node = host;
+    const previous = heldCaptionHosts.get(selector);
+    if (previous && previous !== node &&
+        ![...heldCaptionHosts].some(([key, held]) => key !== selector && held === previous)) {
+      previous.classList.remove(CAPTION_HOLD_CLASS);
+    }
+    node.classList.add(CAPTION_HOLD_CLASS);
+    heldCaptionHosts.set(selector, node);
   }
 
-  function copyCaptionToOverlay(selector, host, html) {
-    const previous = captionOverlays.get(selector);
-    const sourceDisplay = getComputedStyle(host).display;
-    const rect = host.getBoundingClientRect();
-    const box = rect.width && rect.height
-      ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
-      : previous?.box;
-    if (!box) return;
-
-    const clone = host.cloneNode(true);
-    const sourceNodes = [host, ...host.querySelectorAll('*')];
-    const cloneNodes = [clone, ...clone.querySelectorAll('*')];
-    for (let i = 0; i < Math.min(sourceNodes.length, cloneNodes.length); i++) {
-      const source = sourceNodes[i];
-      const target = cloneNodes[i];
-      const computed = getComputedStyle(source);
-      target.removeAttribute('id');
-      for (const property of computed) {
-        if (property === 'visibility') continue;
-        target.style.setProperty(property, computed.getPropertyValue(property));
-      }
-      target.classList.remove(CAPTION_SOURCE_CLASS);
-      target.style.setProperty('visibility', 'visible', 'important');
-      target.style.setProperty('animation', 'none', 'important');
-      target.style.setProperty('transition', 'none', 'important');
+  function releaseCaptionHold(selector) {
+    const node = heldCaptionHosts.get(selector);
+    heldCaptionHosts.delete(selector);
+    if (node && ![...heldCaptionHosts.values()].includes(node)) {
+      node.classList.remove(CAPTION_HOLD_CLASS);
     }
-
-    clone.style.setProperty('display',
-      sourceDisplay === 'none' ? (selector === '#lln-translations' ? 'flex' : 'block') : sourceDisplay,
-      'important');
-    clone.style.setProperty('position', 'fixed', 'important');
-    clone.style.setProperty('left', box.left + 'px', 'important');
-    clone.style.setProperty('top', box.top + 'px', 'important');
-    clone.style.setProperty('width', box.width + 'px', 'important');
-    clone.style.setProperty('height', 'auto', 'important');
-    clone.style.setProperty('margin', '0', 'important');
-    clone.style.setProperty('transform', 'none', 'important');
-    clone.style.setProperty('opacity', '1', 'important');
-    clone.style.setProperty('z-index', '2147482999', 'important');
-    clone.style.setProperty('pointer-events', 'none', 'important');
-
-    const layer = getCaptionOverlay();
-    previous?.clone.remove();
-    layer.appendChild(clone);
-    host.classList.add(CAPTION_SOURCE_CLASS);
-    captionOverlays.set(selector, { clone, box, html, host });
   }
 
   function maintainCaptionContinuity() {
@@ -311,28 +274,36 @@
     for (const selector of ['#lln-subs', '#lln-translations']) {
       const host = document.querySelector(selector);
       if (!host) continue;
-      const html = host.innerHTML;
-      const text = host.textContent.trim();
+      const content = selector === '#lln-subs'
+        ? (host.querySelector('.lln-subs-text') || host)
+        : host;
+      const html = content.innerHTML;
+      const text = content.textContent.trim();
       const previous = captionSnapshots.get(selector);
+      const heldNode = heldCaptionHosts.get(selector);
+      const held = Boolean(heldNode?.isConnected &&
+        (heldNode === host || heldNode.contains(host)));
 
       if (text) {
-        if (!previous || html !== previous || (!captionOverlays.get(selector)?.clone.isConnected || captionOverlays.get(selector)?.host !== host)) {
-          captionSnapshots.set(selector, html);
-          copyCaptionToOverlay(selector, host, html);
-        }
-        host.classList.add(CAPTION_SOURCE_CLASS);
-      } else if (previous) {
-        host.classList.add(CAPTION_SOURCE_CLASS);
+        // Pin every rendered cue immediately. Waiting until LR's opacity fade
+        // reaches zero leaves a visible blank interval before the next scan.
+        if (!previous || html !== previous) captionSnapshots.set(selector, html);
+        if (!held) setCaptionHold(selector, host);
+        continue;
+      }
+
+      // LR can clear or fade its subtitle host between cues. Restore the last
+      // captured caption and keep its host pinned until new text replaces it.
+      if (previous) {
+        if (!held) setCaptionHold(selector, host);
+        content.innerHTML = previous;
       }
     }
   }
 
   function clearCaptionSnapshots() {
-    document.querySelectorAll('.' + CAPTION_SOURCE_CLASS)
-      .forEach(node => node.classList.remove(CAPTION_SOURCE_CLASS));
-    for (const item of captionOverlays.values()) item.clone.remove();
-    captionOverlays.clear();
-    document.querySelector('.' + CAPTION_OVERLAY_CLASS)?.remove();
+    for (const selector of ['#lln-subs', '#lln-translations']) releaseCaptionHold(selector);
+    document.querySelectorAll('.' + CAPTION_HOLD_CLASS).forEach(node => node.classList.remove(CAPTION_HOLD_CLASS));
     captionSnapshots.clear();
   }
 
