@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Language Reactor Don't Learn Translations
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      3.12.0
+// @version      3.13.0
 // @description  Always show dictionary meanings above purple (Don't Learn) words in Language Reactor subtitles.
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -39,7 +39,13 @@
   const LABEL_CLASS = 'lr-dl-label';
   const STYLE_ID = 'lr-dl-style';
   const INLINE_CLASS = 'lr-dl-inline-gloss';
-  const captionSnapshots = new Map();
+  let captionSnapshot = null;
+  let lastCaptionWrapper = null;
+  let lastCaptionText = '';
+  let heldCaptionNode = null;
+  let holdTimer = 0;
+  let lastHoldInsertionAt = 0;
+  let holdInsertions = 0;
   let captionHoldSuspended = false;
 
   const RETRY_MS = 30000;
@@ -52,7 +58,7 @@
   let lastLayoutAt = 0;
   const inspectedWords = new WeakMap();
   const diagnostics = {
-    version: '3.12.0', scannedPurple: 0, labels: 0, visible: 0,
+    version: '3.13.0', scannedPurple: 0, labels: 0, visible: 0,
     collisionHidden: 0, offscreenHidden: 0, emptyDictionary: 0, lookupErrors: 0,
     lastLayout: '', hiddenExamples: [], wordStatuses: [], extraLineSpacing: false,
     inlineFallbacks: 0, captionRows: 0
@@ -235,22 +241,64 @@
     }
   }
 
+  function clearHeldCaption() {
+    if (holdTimer) clearTimeout(holdTimer);
+    holdTimer = 0;
+    if (heldCaptionNode) heldCaptionNode.remove();
+    heldCaptionNode = null;
+  }
+
+  function resetCaptionHold() {
+    clearHeldCaption();
+    captionSnapshot = null;
+    lastCaptionWrapper = null;
+    lastCaptionText = '';
+    holdInsertions = 0;
+    lastHoldInsertionAt = 0;
+  }
+
   function maintainCaptionContinuity() {
-    if (captionHoldSuspended) return;
-    for (const selector of ['#lln-subs', '#lln-translations']) {
-      const host = document.querySelector(selector);
-      if (!host || !captionHostVisible(host)) continue;
-      const content = selector === '#lln-subs'
-        ? (host.querySelector('.lln-subs-text') || host)
-        : host;
-      const html = content.innerHTML;
-      if (content.textContent.trim()) {
-        captionSnapshots.set(selector, html);
-        continue;
-      }
-      const previous = captionSnapshots.get(selector);
-      if (previous) content.innerHTML = previous;
+    const content = document.querySelector('#lln-subs-content');
+    if (!content) return;
+    if (captionHoldSuspended || !captionHostVisible(content)) {
+      clearHeldCaption();
+      return;
     }
+
+    // Language Reactor removes the entire subtitle wrapper between cues.
+    // Keep its native markup inside its native container; never alter layout CSS.
+    const live = [...content.children].find(node =>
+      node.matches('.lln-subs-wrap') && !node.classList.contains('lr-dl-held-caption'));
+    if (live) {
+      clearHeldCaption();
+      const text = live.textContent.trim();
+      if (text && (live !== lastCaptionWrapper || text !== lastCaptionText)) {
+        captionSnapshot = live.cloneNode(true);
+        lastCaptionWrapper = live;
+        lastCaptionText = text;
+        holdInsertions = 0;
+        lastHoldInsertionAt = 0;
+      }
+      return;
+    }
+    if (!captionSnapshot || heldCaptionNode?.isConnected || holdTimer || holdInsertions >= 40) return;
+
+    // Delay and cap writes so a page re-render cannot form a mutation loop.
+    holdTimer = setTimeout(() => {
+      holdTimer = 0;
+      const current = document.querySelector('#lln-subs-content');
+      if (captionHoldSuspended || !current || !captionHostVisible(current) ||
+          current.querySelector('.lln-subs-wrap:not(.lr-dl-held-caption)') ||
+          heldCaptionNode?.isConnected) return;
+      const held = captionSnapshot.cloneNode(true);
+      held.classList.add('lr-dl-held-caption');
+      held.style.pointerEvents = 'none';
+      held.setAttribute('aria-hidden', 'true');
+      current.appendChild(held);
+      heldCaptionNode = held;
+      holdInsertions++;
+      lastHoldInsertionAt = Date.now();
+    }, Math.max(80, 250 - (Date.now() - lastHoldInsertionAt)));
   }
 
   // Screen-space coordinates and CSS placement must share one coordinate system.
@@ -695,7 +743,7 @@
   });
   document.addEventListener('seeking', () => {
     captionHoldSuspended = true;
-    captionSnapshots.clear();
+    resetCaptionHold();
   }, true);
   document.addEventListener('seeked', () => {
     captionHoldSuspended = false;
@@ -703,11 +751,11 @@
   }, true);
   document.addEventListener('ended', () => {
     captionHoldSuspended = true;
-    captionSnapshots.clear();
+    resetCaptionHold();
   }, true);
   document.addEventListener('emptied', () => {
     captionHoldSuspended = true;
-    captionSnapshots.clear();
+    resetCaptionHold();
   }, true);
   document.addEventListener('playing', () => {
     captionHoldSuspended = false;
