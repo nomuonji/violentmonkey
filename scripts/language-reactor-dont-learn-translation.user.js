@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Language Reactor Don't Learn Translations
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      3.9.0
+// @version      3.10.0
 // @description  Always show dictionary meanings above purple (Don't Learn) words in Language Reactor subtitles.
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -57,7 +57,7 @@
   let lastLayoutAt = 0;
   const inspectedWords = new WeakMap();
   const diagnostics = {
-    version: '3.9.0', scannedPurple: 0, labels: 0, visible: 0,
+    version: '3.10.0', scannedPurple: 0, labels: 0, visible: 0,
     collisionHidden: 0, offscreenHidden: 0, emptyDictionary: 0, lookupErrors: 0,
     lastLayout: '', hiddenExamples: [], wordStatuses: [], extraLineSpacing: false,
     inlineFallbacks: 0, captionRows: 0
@@ -188,7 +188,7 @@
         visibility: hidden !important;
       }
       .${CAPTION_BACKDROP_CLASS} {
-        position: fixed; left: 0; width: 100vw; display: none;
+        position: fixed; display: none;
         pointer-events: none; z-index: 0;
         background: rgba(0, 0, 0, 0.85); border-radius: 0;
       }
@@ -383,9 +383,14 @@
       return;
     }
     const background = items.find(item => item.background)?.background || {};
-    captionBackdrop.style.left = '0px';
+    const player = document.querySelector('#movie_player, .html5-video-player');
+    const playerRect = player?.getBoundingClientRect();
+    const left = Math.max(0, playerRect?.left ?? 0);
+    const right = Math.min(document.documentElement.clientWidth,
+      playerRect?.right ?? document.documentElement.clientWidth);
+    captionBackdrop.style.left = left + 'px';
     captionBackdrop.style.top = top + 'px';
-    captionBackdrop.style.width = '100vw';
+    captionBackdrop.style.width = Math.max(0, right - left) + 'px';
     captionBackdrop.style.height = (bottom - top) + 'px';
     captionBackdrop.style.backgroundColor = background.color || 'rgba(0, 0, 0, 0.85)';
     captionBackdrop.style.opacity = String(background.opacity ?? 1);
