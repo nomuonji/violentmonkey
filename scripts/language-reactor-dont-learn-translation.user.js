@@ -280,7 +280,9 @@
       const html = content.innerHTML;
       const text = content.textContent.trim();
       const previous = captionSnapshots.get(selector);
-      const held = heldCaptionHosts.has(selector);
+      const heldNode = heldCaptionHosts.get(selector);
+      const held = Boolean(heldNode?.isConnected &&
+        (heldNode === host || heldNode.contains(host)));
 
       if (text) {
         // Pin every rendered cue immediately. Waiting until LR's opacity fade
