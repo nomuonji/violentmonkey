@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Language Reactor Don't Learn Translations
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      3.8.0
+// @version      3.9.0
 // @description  Always show dictionary meanings above purple (Don't Learn) words in Language Reactor subtitles.
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -57,7 +57,7 @@
   let lastLayoutAt = 0;
   const inspectedWords = new WeakMap();
   const diagnostics = {
-    version: '3.8.0', scannedPurple: 0, labels: 0, visible: 0,
+    version: '3.9.0', scannedPurple: 0, labels: 0, visible: 0,
     collisionHidden: 0, offscreenHidden: 0, emptyDictionary: 0, lookupErrors: 0,
     lastLayout: '', hiddenExamples: [], wordStatuses: [], extraLineSpacing: false,
     inlineFallbacks: 0, captionRows: 0
@@ -358,35 +358,26 @@
       captionBackdrop.className = CAPTION_BACKDROP_CLASS;
       getCaptionOverlay().prepend(captionBackdrop);
     }
-    const video = document.querySelector('video');
-    if (!video) {
-      captionBackdrop.style.display = 'none';
-      return;
-    }
-    const videoRect = video.getBoundingClientRect();
-    if (videoRect.width < 200 || videoRect.height < 100) {
-      captionBackdrop.style.display = 'none';
-      return;
-    }
-
+    const items = [...captionOverlays.values()].filter(item => item.box);
     const subs = document.querySelector(SUBS_SELECTOR);
     const english = subs?.querySelector('.lln-subs-text') || subs;
     const translation = document.querySelector('#lln-translations');
-    const textRects = [
-      ...visibleTextRects(english),
-      ...visibleTextRects(translation)
-    ];
-    const items = [...captionOverlays.values()];
-    const topCandidates = textRects.length
-      ? textRects.map(rect => rect.top)
-      : items.map(item => item.box?.top).filter(Number.isFinite);
-    if (!topCandidates.length) {
+    const textRects = [...visibleTextRects(english), ...visibleTextRects(translation)];
+    if (!items.length && !textRects.length) {
       captionBackdrop.style.display = 'none';
       return;
     }
-
-    const top = Math.max(0, Math.min(...topCandidates) - 22);
-    const bottom = Math.min(document.documentElement.clientHeight, videoRect.bottom);
+    const topCandidates = [
+      ...items.map(item => item.box.top),
+      ...textRects.map(rect => rect.top)
+    ];
+    const bottomCandidates = [
+      ...items.map(item => item.box.top + item.box.height),
+      ...textRects.map(rect => rect.bottom)
+    ];
+    const top = Math.max(0, Math.min(...topCandidates) - 8);
+    const bottom = Math.min(document.documentElement.clientHeight,
+      Math.max(...bottomCandidates) + 8);
     if (bottom <= top) {
       captionBackdrop.style.display = 'none';
       return;
