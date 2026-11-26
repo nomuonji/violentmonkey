@@ -41,6 +41,7 @@
   const INLINE_CLASS = 'lr-dl-inline-gloss';
   const CAPTION_HOLD_CLASS = 'lr-dl-caption-held';
   const captionSnapshots = new Map();
+  const heldCaptionHosts = new Map();
   let captionHoldSuspended = false;
 
   const RETRY_MS = 30000;
@@ -176,8 +177,7 @@
       }
       /* Keep the last rendered caption visible while LR briefly hides its
          subtitle hosts between cues. The hold class is removed on new text. */
-      #lln-subs.lr-dl-caption-held,
-      #lln-translations.lr-dl-caption-held {
+      .lr-dl-caption-held {
         display: block !important;
         visibility: visible !important;
         opacity: 1 !important;
@@ -244,6 +244,23 @@
     }
   }
 
+  function setCaptionHold(selector, host) {
+    let node = host;
+    while (node && node !== document.documentElement) {
+      const style = getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') break;
+      node = node.parentElement;
+    }
+    node ||= host;
+    node.classList.add(CAPTION_HOLD_CLASS);
+    heldCaptionHosts.set(selector, node);
+  }
+
+  function releaseCaptionHold(selector) {
+    heldCaptionHosts.get(selector)?.classList.remove(CAPTION_HOLD_CLASS);
+    heldCaptionHosts.delete(selector);
+  }
+
   function maintainCaptionContinuity() {
     if (captionHoldSuspended) return;
     for (const selector of ['#lln-subs', '#lln-translations']) {
@@ -255,33 +272,32 @@
       const html = content.innerHTML;
       const text = content.textContent.trim();
       const previous = captionSnapshots.get(selector);
-      const held = host.classList.contains(CAPTION_HOLD_CLASS);
+      const held = heldCaptionHosts.has(selector);
 
       if (text) {
         // A changed caption is the hand-off point: replace the held caption
         // and release the host so LR can resume its own timing/visibility.
         if (!previous || html !== previous) {
           captionSnapshots.set(selector, html);
-          host.classList.remove(CAPTION_HOLD_CLASS);
+          releaseCaptionHold(selector);
           continue;
         }
         // Do not undo our own hold on the observer pass caused by its class.
         if (held) continue;
-        if (!captionHostVisible(host)) host.classList.add(CAPTION_HOLD_CLASS);
+        if (!captionHostVisible(host)) setCaptionHold(selector, host);
         continue;
       }
 
       if (previous) {
-        if (!held && !captionHostVisible(host)) host.classList.add(CAPTION_HOLD_CLASS);
+        if (!held && !captionHostVisible(host)) setCaptionHold(selector, host);
         content.innerHTML = previous;
       }
     }
   }
 
   function clearCaptionSnapshots() {
-    for (const selector of ['#lln-subs', '#lln-translations']) {
-      document.querySelector(selector)?.classList.remove(CAPTION_HOLD_CLASS);
-    }
+    for (const selector of ['#lln-subs', '#lln-translations']) releaseCaptionHold(selector);
+    document.querySelectorAll('.' + CAPTION_HOLD_CLASS).forEach(node => node.classList.remove(CAPTION_HOLD_CLASS));
     captionSnapshots.clear();
   }
 
