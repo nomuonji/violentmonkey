@@ -260,6 +260,7 @@
 
   function copyCaptionToOverlay(selector, host, html) {
     const previous = captionOverlays.get(selector);
+    const sourceDisplay = getComputedStyle(host).display;
     const rect = host.getBoundingClientRect();
     const box = rect.width && rect.height
       ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
@@ -284,6 +285,9 @@
       target.style.setProperty('transition', 'none', 'important');
     }
 
+    clone.style.setProperty('display',
+      sourceDisplay === 'none' ? (selector === '#lln-translations' ? 'flex' : 'block') : sourceDisplay,
+      'important');
     clone.style.setProperty('position', 'fixed', 'important');
     clone.style.setProperty('left', box.left + 'px', 'important');
     clone.style.setProperty('top', box.top + 'px', 'important');
@@ -299,7 +303,7 @@
     previous?.clone.remove();
     layer.appendChild(clone);
     host.classList.add(CAPTION_SOURCE_CLASS);
-    captionOverlays.set(selector, { clone, box, html });
+    captionOverlays.set(selector, { clone, box, html, host });
   }
 
   function maintainCaptionContinuity() {
@@ -312,7 +316,7 @@
       const previous = captionSnapshots.get(selector);
 
       if (text) {
-        if (!previous || html !== previous || !captionOverlays.get(selector)?.clone.isConnected) {
+        if (!previous || html !== previous || (!captionOverlays.get(selector)?.clone.isConnected || captionOverlays.get(selector)?.host !== host)) {
           captionSnapshots.set(selector, html);
           copyCaptionToOverlay(selector, host, html);
         }
