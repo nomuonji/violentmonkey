@@ -348,8 +348,17 @@
   }
 
   function updateCaptionBackdrop() {
+    if (!captionOverlays.size) {
+      captionBackdrop?.remove();
+      captionBackdrop = null;
+      return;
+    }
+    if (!captionBackdrop?.isConnected) {
+      captionBackdrop = document.createElement('div');
+      captionBackdrop.className = CAPTION_BACKDROP_CLASS;
+      getCaptionOverlay().prepend(captionBackdrop);
+    }
     const video = document.querySelector('video');
-    if (!captionBackdrop) return;
     if (!video) {
       captionBackdrop.style.display = 'none';
       return;
