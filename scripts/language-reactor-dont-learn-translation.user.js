@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Language Reactor Don't Learn Translations
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      3.5.0
+// @version      3.6.0
 // @description  Always show dictionary meanings above purple (Don't Learn) words in Language Reactor subtitles.
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -55,7 +55,7 @@
   let lastLayoutAt = 0;
   const inspectedWords = new WeakMap();
   const diagnostics = {
-    version: '3.5.0', scannedPurple: 0, labels: 0, visible: 0,
+    version: '3.6.0', scannedPurple: 0, labels: 0, visible: 0,
     collisionHidden: 0, offscreenHidden: 0, emptyDictionary: 0, lookupErrors: 0,
     lastLayout: '', hiddenExamples: [], wordStatuses: [], extraLineSpacing: false,
     inlineFallbacks: 0, captionRows: 0
@@ -262,7 +262,12 @@
     'display', 'color', 'font', 'font-family', 'font-size', 'font-weight',
     'font-style', 'line-height', 'text-align', 'letter-spacing', 'word-spacing',
     'white-space', 'background', 'background-color', 'background-image',
-    'border', 'border-radius', 'padding', 'text-shadow', 'box-sizing', 'direction'
+    'border', 'border-radius', 'padding', 'text-shadow', 'box-shadow',
+    'box-sizing', 'direction'
+  ];
+  const CAPTION_LINE_STYLE_PROPS = [
+    ...ROOT_STYLE_PROPS, 'position', 'left', 'right', 'top', 'bottom',
+    'width', 'min-width', 'max-width', 'transform', 'overflow', 'vertical-align'
   ];
   const WORD_STYLE_PROPS = [
     'color', 'font', 'font-family', 'font-size', 'font-weight', 'font-style',
@@ -305,6 +310,17 @@
     clone.style.setProperty('transition', 'none', 'important');
     clone.style.setProperty('z-index', '2147482999', 'important');
     clone.style.setProperty('pointer-events', 'none', 'important');
+
+    // LR puts the English caption background and line geometry on its
+    // inner text rows, not on #lln-subs itself.
+    const sourceLines = host.querySelectorAll('.lln-subs-text');
+    const cloneLines = clone.querySelectorAll('.lln-subs-text');
+    for (let i = 0; i < Math.min(sourceLines.length, cloneLines.length); i++) {
+      copyStyleProperties(sourceLines[i], cloneLines[i], CAPTION_LINE_STYLE_PROPS);
+      cloneLines[i].style.setProperty('visibility', 'visible', 'important');
+      cloneLines[i].style.setProperty('animation', 'none', 'important');
+      cloneLines[i].style.setProperty('transition', 'none', 'important');
+    }
 
     const sourceWords = host.querySelectorAll(WORD_SELECTOR);
     const cloneWords = clone.querySelectorAll(WORD_SELECTOR);
