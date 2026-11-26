@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Language Reactor Don't Learn Translations
 // @namespace    https://github.com/nomuonji/violentmonkey
-// @version      3.10.0
+// @version      3.11.0
 // @description  Always show dictionary meanings above purple (Don't Learn) words in Language Reactor subtitles.
 // @author       nomuonji
 // @match        https://www.youtube.com/*
@@ -39,12 +39,8 @@
   const LABEL_CLASS = 'lr-dl-label';
   const STYLE_ID = 'lr-dl-style';
   const INLINE_CLASS = 'lr-dl-inline-gloss';
-  const CAPTION_OVERLAY_CLASS = 'lr-dl-caption-overlay';
-  const CAPTION_SOURCE_CLASS = 'lr-dl-caption-source-hidden';
-  const CAPTION_BACKDROP_CLASS = 'lr-dl-caption-backdrop';
+  const CAPTION_PIN_CLASS = 'lr-dl-caption-pinned';
   const captionSnapshots = new Map();
-  const captionOverlays = new Map();
-  let captionBackdrop = null;
   let captionHoldSuspended = false;
 
   const RETRY_MS = 30000;
@@ -57,7 +53,7 @@
   let lastLayoutAt = 0;
   const inspectedWords = new WeakMap();
   const diagnostics = {
-    version: '3.10.0', scannedPurple: 0, labels: 0, visible: 0,
+    version: '3.11.0', scannedPurple: 0, labels: 0, visible: 0,
     collisionHidden: 0, offscreenHidden: 0, emptyDictionary: 0, lookupErrors: 0,
     lastLayout: '', hiddenExamples: [], wordStatuses: [], extraLineSpacing: false,
     inlineFallbacks: 0, captionRows: 0
@@ -178,19 +174,11 @@
       #lln-subs {
         width: 100% !important;
       }
-      /* Keep the last rendered caption visible while LR briefly hides its
-         subtitle hosts between cues. The hold class is removed on new text. */
-      .${CAPTION_OVERLAY_CLASS} {
-        position: fixed; inset: 0; pointer-events: none;
-        z-index: 2147482999;
-      }
-      .${CAPTION_SOURCE_CLASS} {
-        visibility: hidden !important;
-      }
-      .${CAPTION_BACKDROP_CLASS} {
-        position: fixed; display: none;
-        pointer-events: none; z-index: 0;
-        background: rgba(0, 0, 0, 0.85); border-radius: 0;
+      #lln-main-subs.${CAPTION_PIN_CLASS},
+      #lln-subs.${CAPTION_PIN_CLASS},
+      #lln-translations.${CAPTION_PIN_CLASS} {
+        visibility: visible !important;
+        opacity: 1 !important;
       }
       #lln-subs > .lln-subs-text {
         display: block !important;
@@ -254,235 +242,32 @@
     }
   }
 
-  function getCaptionOverlay() {
-    const parent = document.fullscreenElement || document.documentElement;
-    let layer = document.querySelector('.' + CAPTION_OVERLAY_CLASS);
-    if (!layer) {
-      layer = document.createElement('div');
-      layer.className = CAPTION_OVERLAY_CLASS;
-    }
-    if (layer.parentElement !== parent) parent.appendChild(layer);
-    return layer;
-  }
-
-  const ROOT_STYLE_PROPS = [
-    'display', 'color', 'font', 'font-family', 'font-size', 'font-weight',
-    'font-style', 'line-height', 'text-align', 'letter-spacing', 'word-spacing',
-    'white-space', 'background', 'background-color', 'background-image',
-    'border', 'border-radius', 'padding', 'text-shadow', 'box-shadow',
-    'box-sizing', 'direction'
-  ];
-  const CAPTION_LINE_STYLE_PROPS = [
-    ...ROOT_STYLE_PROPS, 'position', 'left', 'right', 'top', 'bottom',
-    'width', 'min-width', 'max-width', 'transform', 'overflow', 'vertical-align'
-  ];
-  const WORD_STYLE_PROPS = [
-    'color', 'font', 'font-family', 'font-size', 'font-weight', 'font-style',
-    'text-decoration', 'background-color', 'text-shadow'
-  ];
-
-  function copyStyleProperties(source, target, properties) {
-    const computed = getComputedStyle(source);
-    for (const property of properties) {
-      const value = computed.getPropertyValue(property);
-      if (value) target.style.setProperty(property, value);
-    }
-  }
-
-  function positionCaptionClone(item, host) {
-    const rect = host.getBoundingClientRect();
-    if (rect.width > 0 && rect.height > 0) {
-      item.box = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
-    }
-    if (!item.box) return false;
-    item.clone.style.setProperty('left', item.box.left + 'px', 'important');
-    item.clone.style.setProperty('top', item.box.top + 'px', 'important');
-    item.clone.style.setProperty('width', item.box.width + 'px', 'important');
-    return true;
-  }
-
-  function clearIndividualCaptionBackground(element) {
-    element.style.setProperty('background-color', 'transparent', 'important');
-    element.style.setProperty('background-image', 'none', 'important');
-    element.style.setProperty('border-color', 'transparent', 'important');
-    element.style.setProperty('box-shadow', 'none', 'important');
-  }
-
-  function findCaptionBackground(host) {
-    const candidates = [
-      ...host.querySelectorAll('.lln-subs-text, .lln-whole-title-translation'),
-      host
-    ];
-    for (const candidate of candidates) {
-      let node = candidate;
-      let depth = 0;
-      while (node && depth++ < 5) {
-        const style = getComputedStyle(node);
-        const color = style.backgroundColor;
-        if (color && color !== 'transparent' && color !== 'rgba(0, 0, 0, 0)') {
-          const opacity = Number.parseFloat(style.opacity);
-          return { color, opacity: Number.isFinite(opacity) ? opacity : 1 };
-        }
-        if (node === host) break;
-        node = node.parentElement;
-      }
-    }
-    return { color: 'rgba(0, 0, 0, 0.85)', opacity: 1 };
-  }
-
-  function visibleTextRects(root) {
-    if (!root) return [];
-    const range = document.createRange();
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    const rects = [];
-    let node;
-    while ((node = walker.nextNode())) {
-      if (!node.textContent.trim()) continue;
-      range.selectNodeContents(node);
-      for (const rect of range.getClientRects()) {
-        if (rect.width && rect.height) rects.push(rect);
-      }
-    }
-    range.detach?.();
-    return rects;
-  }
-
-  function updateCaptionBackdrop() {
-    if (!captionOverlays.size) {
-      captionBackdrop?.remove();
-      captionBackdrop = null;
-      return;
-    }
-    if (!captionBackdrop?.isConnected) {
-      captionBackdrop = document.createElement('div');
-      captionBackdrop.className = CAPTION_BACKDROP_CLASS;
-      getCaptionOverlay().prepend(captionBackdrop);
-    }
-    const items = [...captionOverlays.values()].filter(item => item.box);
-    const subs = document.querySelector(SUBS_SELECTOR);
-    const english = subs?.querySelector('.lln-subs-text') || subs;
-    const translation = document.querySelector('#lln-translations');
-    const textRects = [...visibleTextRects(english), ...visibleTextRects(translation)];
-    if (!items.length && !textRects.length) {
-      captionBackdrop.style.display = 'none';
-      return;
-    }
-    const topCandidates = [
-      ...items.map(item => item.box.top),
-      ...textRects.map(rect => rect.top)
-    ];
-    const bottomCandidates = [
-      ...items.map(item => item.box.top + item.box.height),
-      ...textRects.map(rect => rect.bottom)
-    ];
-    const top = Math.max(0, Math.min(...topCandidates) - 8);
-    const bottom = Math.min(document.documentElement.clientHeight,
-      Math.max(...bottomCandidates) + 8);
-    if (bottom <= top) {
-      captionBackdrop.style.display = 'none';
-      return;
-    }
-    const background = items.find(item => item.background)?.background || {};
-    const player = document.querySelector('#movie_player, .html5-video-player');
-    const playerRect = player?.getBoundingClientRect();
-    const left = Math.max(0, playerRect?.left ?? 0);
-    const right = Math.min(document.documentElement.clientWidth,
-      playerRect?.right ?? document.documentElement.clientWidth);
-    captionBackdrop.style.left = left + 'px';
-    captionBackdrop.style.top = top + 'px';
-    captionBackdrop.style.width = Math.max(0, right - left) + 'px';
-    captionBackdrop.style.height = (bottom - top) + 'px';
-    captionBackdrop.style.backgroundColor = background.color || 'rgba(0, 0, 0, 0.85)';
-    captionBackdrop.style.opacity = String(background.opacity ?? 1);
-    captionBackdrop.style.display = 'block';
-  }
-
-  function copyCaptionToOverlay(selector, host, html) {
-    const previous = captionOverlays.get(selector);
-    const clone = host.cloneNode(true);
-    clone.removeAttribute('id');
-    clone.classList.remove(CAPTION_SOURCE_CLASS);
-    copyStyleProperties(host, clone, ROOT_STYLE_PROPS);
-    clone.style.setProperty('position', 'fixed', 'important');
-    clone.style.setProperty('height', 'auto', 'important');
-    clone.style.setProperty('margin', '0', 'important');
-    clone.style.setProperty('transform', 'none', 'important');
-    clone.style.setProperty('visibility', 'visible', 'important');
-    clone.style.setProperty('opacity', '1', 'important');
-    clone.style.setProperty('animation', 'none', 'important');
-    clone.style.setProperty('transition', 'none', 'important');
-    clone.style.setProperty('z-index', '2147482999', 'important');
-    clone.style.setProperty('pointer-events', 'none', 'important');
-
-    // LR puts the English caption background and line geometry on its
-    // inner text rows, not on #lln-subs itself.
-    const sourceLines = host.querySelectorAll('.lln-subs-text');
-    const cloneLines = clone.querySelectorAll('.lln-subs-text');
-    for (let i = 0; i < Math.min(sourceLines.length, cloneLines.length); i++) {
-      copyStyleProperties(sourceLines[i], cloneLines[i], CAPTION_LINE_STYLE_PROPS);
-      cloneLines[i].style.setProperty('visibility', 'visible', 'important');
-      cloneLines[i].style.setProperty('animation', 'none', 'important');
-      cloneLines[i].style.setProperty('transition', 'none', 'important');
-      clearIndividualCaptionBackground(cloneLines[i]);
-    }
-
-    const sourceWords = host.querySelectorAll(WORD_SELECTOR);
-    const cloneWords = clone.querySelectorAll(WORD_SELECTOR);
-    for (let i = 0; i < Math.min(sourceWords.length, cloneWords.length); i++) {
-      copyStyleProperties(sourceWords[i], cloneWords[i], WORD_STYLE_PROPS);
-    }
-    const sourceTranslations = host.querySelectorAll('.lln-whole-title-translation');
-    const cloneTranslations = clone.querySelectorAll('.lln-whole-title-translation');
-    for (let i = 0; i < Math.min(sourceTranslations.length, cloneTranslations.length); i++) {
-      copyStyleProperties(sourceTranslations[i], cloneTranslations[i], ROOT_STYLE_PROPS);
-      clearIndividualCaptionBackground(cloneTranslations[i]);
-    }
-    clearIndividualCaptionBackground(clone);
-
-    const item = {
-      clone, html, host, box: previous?.box,
-      background: findCaptionBackground(host)
-    };
-    if (!positionCaptionClone(item, host)) return;
-    getCaptionOverlay().appendChild(clone);
-    previous?.clone.remove();
-    host.classList.add(CAPTION_SOURCE_CLASS);
-    captionOverlays.set(selector, item);
-  }
-
   function maintainCaptionContinuity() {
     if (captionHoldSuspended) return;
     for (const selector of ['#lln-subs', '#lln-translations']) {
       const host = document.querySelector(selector);
       if (!host) continue;
-      const html = host.innerHTML;
-      const text = host.textContent.trim();
-      const previous = captionSnapshots.get(selector);
-      const overlay = captionOverlays.get(selector);
-
-      if (text) {
-        if (!previous || html !== previous || !overlay?.clone.isConnected || overlay.host !== host) {
-          captionSnapshots.set(selector, html);
-          copyCaptionToOverlay(selector, host, html);
-        } else {
-          positionCaptionClone(overlay, host);
-        }
-        host.classList.add(CAPTION_SOURCE_CLASS);
-      } else if (previous) {
-        host.classList.add(CAPTION_SOURCE_CLASS);
+      const content = selector === '#lln-subs'
+        ? (host.querySelector('.lln-subs-text') || host)
+        : host;
+      const html = content.innerHTML;
+      if (content.textContent.trim()) {
+        captionSnapshots.set(selector, html);
+      } else {
+        const previous = captionSnapshots.get(selector);
+        if (previous) content.innerHTML = previous;
+      }
+      if (captionSnapshots.has(selector)) {
+        host.classList.add(CAPTION_PIN_CLASS);
+        document.querySelector('#lln-main-subs')?.classList.add(CAPTION_PIN_CLASS);
       }
     }
-    updateCaptionBackdrop();
   }
 
-  function clearCaptionSnapshots() {
-    document.querySelectorAll('.' + CAPTION_SOURCE_CLASS)
-      .forEach(node => node.classList.remove(CAPTION_SOURCE_CLASS));
-    for (const item of captionOverlays.values()) item.clone.remove();
-    captionOverlays.clear();
-    document.querySelector('.' + CAPTION_OVERLAY_CLASS)?.remove();
-    captionBackdrop = null;
+  function clearCaptionContinuity() {
     captionSnapshots.clear();
+    document.querySelectorAll('.' + CAPTION_PIN_CLASS)
+      .forEach(node => node.classList.remove(CAPTION_PIN_CLASS));
   }
 
   // Screen-space coordinates and CSS placement must share one coordinate system.
@@ -909,14 +694,15 @@
   }
 
   new MutationObserver(mutations => {
-    // Coalesce subtitle updates and ignore mutations from our own overlay.
-    const relevant = mutations.some(m => {
+    // Ignore our own label updates.
+    for (const m of mutations) {
       const target = m.target.nodeType === 1 ? m.target : m.target.parentElement;
-      return target &&
-        !target.closest('.' + LAYER_CLASS) &&
-        !target.closest('.' + CAPTION_OVERLAY_CLASS);
-    });
-    if (relevant) scheduleScan();
+      if (!target?.closest?.('.' + LAYER_CLASS)) {
+        maintainCaptionContinuity();
+        scheduleScan();
+        return;
+      }
+    }
   }).observe(document.documentElement, {
     childList: true,
     subtree: true,
@@ -926,7 +712,7 @@
   });
   document.addEventListener('seeking', () => {
     captionHoldSuspended = true;
-    clearCaptionSnapshots();
+    clearCaptionContinuity();
   }, true);
   document.addEventListener('seeked', () => {
     captionHoldSuspended = false;
@@ -934,20 +720,16 @@
   }, true);
   document.addEventListener('ended', () => {
     captionHoldSuspended = true;
-    clearCaptionSnapshots();
+    clearCaptionContinuity();
   }, true);
   document.addEventListener('emptied', () => {
     captionHoldSuspended = true;
-    clearCaptionSnapshots();
+    clearCaptionContinuity();
   }, true);
   document.addEventListener('playing', () => {
     captionHoldSuspended = false;
   }, true);
-  window.addEventListener('resize', () => {
-    updateCaptionBackgroundWidth();
-    scheduleScan();
-  }, { passive: true });
-  document.addEventListener('fullscreenchange', scheduleScan);
+  window.addEventListener('resize', updateCaptionBackgroundWidth, { passive: true });
 
   // LR sometimes replaces the subtitle DOM without a relevant mutation,
   // and empty dictionary results must eventually be retried.
