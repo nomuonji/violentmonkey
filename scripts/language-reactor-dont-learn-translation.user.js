@@ -319,7 +319,8 @@
         const style = getComputedStyle(node);
         const color = style.backgroundColor;
         if (color && color !== 'transparent' && color !== 'rgba(0, 0, 0, 0)') {
-          return { color, opacity: Number(style.opacity) || 1 };
+          const opacity = Number.parseFloat(style.opacity);
+          return { color, opacity: Number.isFinite(opacity) ? opacity : 1 };
         }
         if (node === host) break;
         node = node.parentElement;
@@ -352,7 +353,7 @@
     captionBackdrop.style.width = width + 'px';
     captionBackdrop.style.height = height + 'px';
     captionBackdrop.style.backgroundColor = background.color || 'rgba(0, 0, 0, 0.85)';
-    captionBackdrop.style.opacity = String(background.opacity || 1);
+    captionBackdrop.style.opacity = String(background.opacity ?? 1);
   }
 
   function copyCaptionToOverlay(selector, host, html) {
